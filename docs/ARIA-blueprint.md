@@ -1,0 +1,1073 @@
+# ARIA — Adaptive Resource for Inference and AI
+## Blueprint Funzionale v1.0
+
+> Piattaforma di inferenza AI privata e distribuita per reti domestiche e locali.
+> ARIA trasforma qualsiasi PC con GPU in un servizio di inferenza condiviso,
+> accessibile da qualsiasi device sulla stessa rete come se fosse un'API cloud —
+> con la differenza che gira a casa tua, senza costi ricorrenti e senza privacy compromessa.
+
+---
+
+## INDICE
+
+1. [Visione e Principi](#1-visione-e-principi)
+2. [Architettura di Sistema](#2-architettura-di-sistema)
+3. [Componenti](#3-componenti)
+   - 3.1 ARIA Server (GPU Host)
+   - 3.2 ARIA Client (Library)
+   - 3.3 ARIA Redis Bus (Shared)
+4. [Modelli Supportati e Backend](#4-modelli-supportati-e-backend)
+5. [Schema Task — Specifiche Complete](#5-schema-task--specifiche-complete)
+6. [Ciclo di Vita di un Task](#6-ciclo-di-vita-di-un-task)
+7. [Gestione Semaforo e Disponibilità GPU](#7-gestione-semaforo-e-disponibilitgpu)
+8. [Scenari di Utilizzo e Comportamento](#8-scenari-di-utilizzo-e-comportamento)
+9. [Gestione File Binari](#9-gestione-file-binari)
+10. [Multi-Client: Routing e Isolamento](#10-multi-client-routing-e-isolamento)
+11. [API HTTP di ARIA Server](#11-api-http-di-aria-server)
+12. [Configurazione](#12-configurazione)
+13. [Sicurezza](#13-sicurezza)
+14. [Limiti e Vincoli Noti](#14-limiti-e-vincoli-noti)
+
+---
+
+## 1. Visione e Principi
+
+### La metafora
+
+ARIA funziona come una **stampante di rete intelligente** per l'AI generativa.
+Esattamente come una stampante di rete:
+- È sempre disponibile per chi è sulla rete (quando accesa)
+- Accoda i lavori da più dispositivi simultaneamente
+- Esegue i lavori quando la risorsa è libera
+- Notifica il mittente quando il lavoro è completato
+- Non richiede che il mittente resti in attesa
+
+La differenza rispetto a una stampante: ARIA è **asíncrona per design**. Il
+client invia il task e continua a lavorare. Il risultato arriva quando la GPU
+ha finito — potrebbe essere tra 30 secondi, potrebbe essere dopo che l'utente
+ha finito di giocare. Il client è progettato per gestire questa latenza variabile.
+
+### Principi fondamentali
+
+**1. Agnosticismo totale**
+ARIA Server non conosce DIAS, non conosce nessun progetto specifico.
+Riceve task con un tipo, un modello, un payload. Li esegue. Restituisce risultati.
+Qualsiasi client può usarlo per qualsiasi scopo.
+
+**2. Non-blocking sempre**
+`submit_task()` ritorna in <100ms in qualsiasi scenario — GPU occupata,
+PC spento, semaforo rosso. Il task viene accodato o rifiutato con un codice
+chiaro, mai con un timeout sospeso.
+
+**3. Zero perdita di task**
+Un task scritto su Redis è persistente. Se il Server crasha durante l'esecuzione,
+il task viene rimesso in coda al riavvio. Se il PC è spento, il task aspetta.
+L'unico modo in cui un task sparisce è: completamento, scadenza esplicita (TTL),
+o cancellazione esplicita dal client.
+
+**4. Un modello alla volta in VRAM**
+La RTX 5060 Ti ha 16GB. Caricare due modelli grandi contemporaneamente
+causa OOM o degradazione. ARIA carica un modello, esegue tutti i task
+disponibili per quel modello, poi decide se cambiare. La decisione è del
+Batch Optimizer, non del client.
+
+**5. Intercambiabilità dei backend**
+Ogni tipo di modello ha un backend Python. L'interfaccia è identica per tutti:
+`load()`, `unload()`, `run(payload) → result`. Aggiungere supporto a un nuovo
+modello significa scrivere un nuovo backend — niente altro cambia.
+
+**6. Privacy totale**
+Nessun dato lascia la rete locale. Nessun log remoto. Nessuna telemetria.
+Il codice è open source e ispezionabile.
+
+---
+
+## 2. Architettura di Sistema
+
+### Topologia fisica
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║                     RETE LOCALE (LAN)                        ║
+║                                                              ║
+║  ┌─────────────────────┐      ┌──────────────────────────┐  ║
+║  │   MINIPC (24/7)     │      │   PC GAMING (on-demand)  │  ║
+║  │                     │      │                          │  ║
+║  │  DIAS               │      │  ARIA SERVER             │  ║
+║  │  + ARIA Client      │◄────►│  (Python service)        │  ║
+║  │                     │      │                          │  ║
+║  │  Redis Server ◄─────┼──────┼─── legge/scrive code     │  ║
+║  │  (sempre attivo)    │      │                          │  ║
+║  └─────────────────────┘      │  RTX 5060 Ti 16GB        │  ║
+║                               └──────────────────────────┘  ║
+║                                                              ║
+║  ┌──────────────────┐   ┌───────────────────────────────┐   ║
+║  │  LAPTOP / altro  │   │  FUTURO: altro device con GPU  │  ║
+║  │  + ARIA Client   │   │  + ARIA Server                 │  ║
+║  └──────────────────┘   └───────────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+### Flusso dati ad alto livello
+
+```
+CLIENT                    REDIS (minipc)              ARIA SERVER (gaming PC)
+  │                           │                               │
+  │── submit_task() ─────────►│                               │
+  │   LPUSH gpu:queue:*       │                               │
+  │◄─ job_id ─────────────────│                               │
+  │                           │◄──── BRPOP gpu:queue:* ───────│
+  │                           │      (polling continuo)       │
+  │                           │                               │── carica modello
+  │                           │                               │── esegue inferenza
+  │                           │                               │── salva output
+  │                           │◄──── SET gpu:result:{id} ─────│
+  │                           │                               │
+  │── get_result() ──────────►│                               │
+  │◄─ result ─────────────────│                               │
+```
+
+### Componenti software
+
+```
+ARIA SERVER (Windows — PC Gaming)
+├── aria_server/
+│   ├── main.py                  # Entry point e orchestratore
+│   ├── queue_manager.py         # BRPOP da Redis, routing ai worker
+│   ├── batch_optimizer.py       # Decide quale modello caricare
+│   ├── vram_manager.py          # Load/unload modelli, monitoring VRAM
+│   ├── semaphore.py             # Gestione stato green/red/busy
+│   ├── result_writer.py         # Scrive risultati su Redis
+│   ├── heartbeat.py             # Pubblica stato ogni 10s su Redis
+│   ├── backends/
+│   │   ├── base_backend.py      # Interfaccia astratta
+│   │   ├── tts_backend.py       # TTS (Orpheus, Kokoro, F5-TTS)
+│   │   ├── music_backend.py     # Music gen (MusicGen, AudioLDM)
+│   │   ├── llm_backend.py       # LLM testuali (Llama, Qwen, Mistral)
+│   │   ├── image_backend.py     # Image gen (SDXL, Flux)
+│   │   ├── vision_backend.py    # Multimodale (Qwen-VL, InternVL)
+│   │   └── stt_backend.py       # Speech-to-text (Whisper)
+│   └── api/
+│       └── http_api.py          # FastAPI: semaforo, status, health
+
+ARIA CLIENT (Python library — installabile su qualsiasi device)
+├── aria_client/
+│   ├── client.py                # ARIAClient: submit, get_result, wait
+│   ├── watcher.py               # Background thread: polling risultati
+│   ├── task_builder.py          # Builder per payload per tipo modello
+│   ├── dead_letter.py           # Gestione task scaduti/falliti
+│   └── mock_client.py           # Mock per sviluppo offline
+
+INFRASTRUTTURA CONDIVISA
+├── Redis (minipc, sempre attivo)    # Message bus centrale
+└── Samba/NFS share (minipc)         # File binari: audio, immagini, video
+```
+
+---
+
+## 3. Componenti
+
+### 3.1 ARIA Server
+
+ARIA Server è il processo che gira sul PC con GPU. Ha una sola responsabilità:
+**ricevere task da Redis, eseguirli sulla GPU, scrivere i risultati su Redis**.
+
+Non espone direttamente i modelli. Non conosce i client. Non ha stato applicativo
+oltre alla coda corrente. È stateless rispetto ai progetti — tutto lo stato
+vive su Redis.
+
+Il loop principale:
+
+```
+loop:
+  1. Leggi stato semaforo → se RED: attendi, non consumare task
+  2. Chiedi a BatchOptimizer: quale modello caricare?
+  3. Se modello diverso da quello in VRAM: unload → load nuovo
+  4. Consuma task dalla coda del modello scelto (BRPOP)
+  5. Sposta task in gpu:processing:{job_id} (visibility timeout)
+  6. Esegui inferenza con backend appropriato
+  7. Scrivi risultato in gpu:result:{client_id}:{job_id}
+  8. Elimina gpu:processing:{job_id}
+  9. Torna a 2
+```
+
+### 3.2 ARIA Client
+
+ARIA Client è una **libreria Python** che si installa su qualsiasi device
+sulla rete. Non è un servizio — è importata dal codice applicativo.
+
+Interfaccia pubblica:
+
+```python
+client = ARIAClient(redis_host="192.168.1.10", client_id="dias-minipc")
+
+# Invia task — ritorna sempre in <100ms
+job_id = client.submit_task(
+    model_type="tts",
+    model_id="orpheus-3b",
+    payload={...},
+    priority=1,
+    timeout_seconds=1800
+)
+
+# Controlla risultato senza bloccare
+result = client.get_result(job_id)  # → result dict | None
+
+# Aspetta risultato (blocca — usare con cautela)
+result = client.wait_result(job_id, timeout_seconds=3600)
+
+# Stato del server
+status = client.server_status()     # → {semaphore, vram, queues, ...}
+available = client.is_available()   # → bool
+```
+
+Il Watcher è un componente opzionale del client — un thread background che
+monitora continuamente i risultati e chiama callback registrate:
+
+```python
+def on_voice_ready(job_id, result):
+    # aggiorna stato DIAS quando Orpheus ha finito
+    update_scene_state(job_id, result)
+
+client.watcher.register_callback("tts", on_voice_ready)
+client.watcher.start()
+```
+
+### 3.3 ARIA Redis Bus
+
+Redis è il **sistema nervoso** di ARIA. Non è un componente di ARIA — è
+l'infrastruttura su cui ARIA opera. Deve essere sempre accessibile.
+
+Struttura chiavi completa:
+
+```
+# Code di input (scritte dal Client, lette dal Server)
+gpu:queue:{model_type}:{model_id}     # Lista FIFO, LPUSH/BRPOP
+  es: gpu:queue:tts:orpheus-3b
+  es: gpu:queue:music:musicgen-small
+  es: gpu:queue:llm:llama-3.1-8b
+  es: gpu:queue:image:flux-dev
+
+# Task in esecuzione (visibility timeout, prevenzione perdita su crash)
+gpu:processing:{job_id}               # Hash, TTL = timeout_seconds task
+
+# Risultati (scritti dal Server, letti dal Client)
+gpu:result:{client_id}:{job_id}       # String JSON, TTL configurabile
+  es: gpu:result:dias-minipc:uuid-123
+
+# Stato Server (scritto dal Server ogni 10s)
+gpu:server:status                     # Hash
+gpu:server:semaphore                  # String: "green" | "red" | "busy"
+gpu:server:heartbeat                  # Timestamp ultimo heartbeat
+
+# Task scaduti (scritti dal Client Watcher)
+gpu:dead:{client_id}:{job_id}         # Hash con motivo scadenza
+
+# Metriche (opzionale, per monitoring)
+gpu:metrics:completed_count           # Contatore totale task completati
+gpu:metrics:avg_duration:{model_id}   # Media mobile durata per modello
+```
+
+---
+
+## 4. Modelli Supportati e Backend
+
+### Architettura backend
+
+Ogni backend implementa l'interfaccia `BaseBackend`:
+
+```python
+class BaseBackend(ABC):
+    model_id: str
+    model_type: str
+
+    @abstractmethod
+    def load(self, model_path: str, config: dict) -> None:
+        """Carica il modello in VRAM. Chiamato da VRAMManager."""
+
+    @abstractmethod
+    def unload(self) -> None:
+        """Scarica il modello. Libera VRAM completamente."""
+
+    @abstractmethod
+    def run(self, payload: dict) -> dict:
+        """Esegue inferenza. Input e output sono dict validati dallo schema."""
+
+    @abstractmethod
+    def estimated_vram_gb(self) -> float:
+        """VRAM stimata per questo modello. Usata da VRAMManager pre-load."""
+
+    def is_loaded(self) -> bool:
+        return self._model is not None
+```
+
+### Tabella modelli supportati
+
+| model_type | model_id (esempi) | VRAM est. | Framework | Output |
+|---|---|---|---|---|
+| `tts` | `orpheus-3b` | 7GB | transformers | WAV mono 48kHz |
+| `tts` | `kokoro-v1` | 2GB | transformers | WAV mono 24kHz |
+| `tts` | `f5-tts` | 4GB | transformers | WAV mono 24kHz |
+| `music` | `musicgen-small` | 4GB | audiocraft | WAV stereo 48kHz |
+| `music` | `musicgen-medium` | 8GB | audiocraft | WAV stereo 48kHz |
+| `llm` | `llama-3.1-8b` | 6GB (q4) | transformers | text |
+| `llm` | `qwen2.5-7b` | 5GB (q4) | transformers | text |
+| `llm` | `mistral-7b` | 5GB (q4) | transformers | text |
+| `image` | `sdxl-base` | 7GB | diffusers | PNG/JPEG |
+| `image` | `flux-dev` | 12GB | diffusers | PNG/JPEG |
+| `vision` | `qwen-vl-7b` | 8GB | transformers | text |
+| `vision` | `internvl2-8b` | 9GB | transformers | text |
+| `stt` | `whisper-large-v3` | 3GB | faster-whisper | text + timestamps |
+
+### Nota su VRAM e coesistenza
+
+Con 16GB VRAM, non si possono caricare due modelli grandi contemporaneamente.
+Il VRAMManager verifica sempre `estimated_vram_gb()` prima di caricare.
+Se VRAM insufficiente: unload del modello corrente prima di caricare il nuovo.
+
+L'unica eccezione: modelli molto piccoli (Kokoro 2GB + Whisper 3GB = 5GB)
+potrebbero coesistere. Questa ottimizzazione è futura — il comportamento
+di default è sempre "un modello alla volta".
+
+---
+
+## 5. Schema Task — Specifiche Complete
+
+### Task in ingresso (Client → Redis → Server)
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "client_id": "dias-minipc",
+  "client_ip": "192.168.1.10",
+  "client_version": "1.0.0",
+
+  "model_type": "tts",
+  "model_id": "orpheus-3b",
+
+  "queued_at": "2026-02-20T10:00:00Z",
+  "priority": 1,
+  "timeout_seconds": 1800,
+
+  "callback_key": "gpu:result:dias-minipc:550e8400-...",
+
+  "file_refs": {
+    "input": [
+      {
+        "ref_id": "voice_sample",
+        "shared_path": "/mnt/aria-shared/voices/narrator.wav",
+        "size_bytes": 441000
+      }
+    ],
+    "output": [
+      {
+        "ref_id": "audio_output",
+        "shared_path": "/mnt/aria-shared/output/book_123/scene_001.wav"
+      }
+    ]
+  },
+
+  "payload": {
+    // Specifico per model_type — vedi sezione payload per tipo
+  }
+}
+```
+
+**Campi obbligatori**: `job_id`, `client_id`, `model_type`, `model_id`,
+`queued_at`, `timeout_seconds`, `callback_key`, `payload`
+
+**Campi opzionali**: `client_ip`, `client_version`, `file_refs`, `priority`
+
+**Priority**: 1=normale (default), 2=alta, 3=urgente.
+Il BatchOptimizer considera la priorità all'interno della stessa coda modello.
+
+### Payload per tipo modello
+
+**TTS (model_type: tts)**:
+```json
+{
+  "text": "leah: Aprì la porta. <gasp> Non c'era nessuno.",
+  "voice_name": "leah",
+  "voice_sample_ref": "voice_sample",
+  "pace_factor": 0.82,
+  "output_ref": "audio_output",
+  "output_format": "wav",
+  "sample_rate": 48000,
+  "channels": 1
+}
+```
+
+**Music Generation (model_type: music)**:
+```json
+{
+  "prompt": "Gregorian choir ambient, cold stone, minor key, 70bpm",
+  "duration_seconds": 147,
+  "output_ref": "audio_output",
+  "output_format": "wav",
+  "sample_rate": 48000,
+  "channels": 2,
+  "loop_seamless": true
+}
+```
+
+**LLM Testuale (model_type: llm)**:
+```json
+{
+  "messages": [
+    {"role": "system", "content": "Sei un analista narrativo..."},
+    {"role": "user", "content": "Analizza questo testo: ..."}
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.2,
+  "response_format": "json"
+}
+```
+
+**Image Generation (model_type: image)**:
+```json
+{
+  "prompt": "A dark monastery library, candlelight, dramatic shadows",
+  "negative_prompt": "blurry, low quality",
+  "width": 1024,
+  "height": 1024,
+  "steps": 30,
+  "guidance_scale": 7.5,
+  "output_ref": "image_output",
+  "output_format": "png"
+}
+```
+
+**Vision / Multimodale (model_type: vision)**:
+```json
+{
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "image", "image_ref": "input_image"},
+      {"type": "text", "text": "Descrivi questa immagine in italiano."}
+    ]}
+  ],
+  "max_tokens": 500
+}
+```
+
+**Speech-to-Text (model_type: stt)**:
+```json
+{
+  "audio_ref": "audio_input",
+  "language": "it",
+  "task": "transcribe",
+  "word_timestamps": true,
+  "output_format": "json"
+}
+```
+
+### Risultato (Server → Redis → Client)
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "client_id": "dias-minipc",
+  "model_type": "tts",
+  "model_id": "orpheus-3b",
+
+  "status": "done",
+  "completed_at": "2026-02-20T10:02:30Z",
+  "duration_seconds": 142.5,
+  "processing_time_seconds": 68.2,
+
+  "output": {
+    // Specifico per tipo modello
+    "audio_ref": "audio_output",
+    "duration_seconds": 142.5,
+    "sample_rate": 48000
+  },
+
+  "error": null,
+  "error_code": null,
+  "retry_count": 0
+}
+```
+
+**status** può essere: `done` | `error` | `timeout` | `cancelled`
+
+**error_code** in caso di errore: `OOM` | `MODEL_LOAD_FAILED` |
+`INFERENCE_FAILED` | `INVALID_PAYLOAD` | `FILE_NOT_FOUND` | `TIMEOUT`
+
+---
+
+## 6. Ciclo di Vita di un Task
+
+```
+                    ┌─────────┐
+                    │ CREATED │  client.submit_task()
+                    └────┬────┘
+                         │ LPUSH su gpu:queue:{type}:{model}
+                    ┌────▼────┐
+                    │ QUEUED  │  task in coda Redis, job_id al client
+                    └────┬────┘
+         semaforo green  │  BatchOptimizer sceglie questo modello
+                    ┌────▼──────────┐
+                    │  PROCESSING   │  task in gpu:processing:{job_id}
+                    └────┬──────────┘
+              ┌──────────┴──────────┐
+         successo                 errore
+              │                     │
+        ┌─────▼────┐          ┌─────▼──────┐
+        │   DONE   │          │   FAILED   │
+        └─────┬────┘          └─────┬──────┘
+              │                     │ retry < max_retries?
+    risultato su Redis         ┌────▼────┐
+    TTL result_ttl_s           │  RETRY  │──► torna a QUEUED
+              │                └─────────┘
+         ┌────▼────┐                │ retry >= max_retries
+         │  READ   │          ┌─────▼──────────┐
+         └────┬────┘          │  DEAD LETTER   │
+              │               └────────────────┘
+         ┌────▼────────┐
+         │  CONSUMED   │  client ha letto il risultato
+         └─────────────┘
+```
+
+### Transizioni speciali
+
+**QUEUED → DEAD LETTER (timeout)**:
+Il Client Watcher controlla periodicamente i task in stato QUEUED.
+Se `now - queued_at > timeout_seconds` → sposta in dead letter.
+Ragione: il PC è probabilmente spento da troppo tempo e il task non ha
+più senso (es. DIAS ha già fallito su quel capitolo per altri motivi).
+
+**PROCESSING → QUEUED (crash recovery)**:
+All'avvio di ARIA Server, controlla `gpu:processing:*`.
+Se trova task in processing (da un crash precedente) → li rimette in coda.
+Questo garantisce zero perdita di task su crash server.
+
+**QUEUED → QUEUED (semaforo red)**:
+Il task resta in coda. Il Server non consuma. Nessuna transizione di stato.
+Il task aspetta semaforo green — anche per giorni se necessario.
+
+---
+
+## 7. Gestione Semaforo e Disponibilità GPU
+
+### Stati del semaforo
+
+```
+GREEN  → Server attivo, GPU disponibile per inferenza
+RED    → Server attivo, GPU riservata all'utente (gioco, lavoro)
+BUSY   → Server sta eseguendo un task (transizione automatica)
+OFFLINE → Server non raggiungibile (heartbeat mancante da >30s)
+```
+
+### Chi imposta cosa
+
+**Server imposta automaticamente**:
+- `BUSY` quando inizia un task
+- `GREEN` quando termina un task (se non era stato impostato RED manualmente)
+- Scrive `heartbeat` ogni 10 secondi
+
+**Utente imposta manualmente**:
+- `RED` tramite tray icon Windows o chiamata API
+- `GREEN` per riprendere dopo pausa manuale
+
+**Client legge ma non scrive** il semaforo (sicurezza: solo il server
+e l'utente locale controllano la GPU).
+
+### Comportamento con semaforo RED
+
+```
+Server:
+  - Finisce il task corrente (non interrompe l'inferenza a metà)
+  - Non consuma nuovi task dalla coda
+  - Mantiene il modello in VRAM (non fa unload — potrebbe tornare GREEN presto)
+  - Continua a scrivere heartbeat (è online, solo in pausa)
+  - Se RED dura >30 min: fa unload modello per liberare VRAM
+
+Client:
+  - submit_task() funziona normalmente — task va in coda
+  - is_available() ritorna False
+  - I task si accumulano in coda silenziosamente
+  - Il Watcher continua a fare polling (i task completati prima del RED
+    potrebbero ancora arrivare)
+  - Nessun timeout prematuro — il timeout del task è relativo alla creazione,
+    non all'inizio dell'esecuzione
+```
+
+### Comportamento con server OFFLINE
+
+```
+Server:
+  - Non c'è (PC spento o crash)
+  - Nessun heartbeat scritto
+
+Client:
+  - submit_task() funziona — task va in coda (Redis è ancora attivo sul minipc)
+  - is_available() ritorna False
+  - server_status() ritorna {"status": "offline", "last_seen": "..."}
+  - I task si accumulano silenziosamente
+  - Dead Letter Handler monitora timeout — se task troppo vecchio → dead letter
+```
+
+---
+
+## 8. Scenari di Utilizzo e Comportamento
+
+### Scenario A — Flusso normale, server disponibile
+
+```
+t=0s   DIAS Stage C: submit_task(tts, orpheus, payload_scena_1) → job_id_1
+t=0.1s DIAS Stage C: submit_task(tts, orpheus, payload_scena_2) → job_id_2
+t=0.2s DIAS Stage C: submit_task(tts, orpheus, payload_scena_3) → job_id_3
+
+t=1s   ARIA Server: vede 3 task in gpu:queue:tts:orpheus
+       BatchOptimizer: carica Orpheus (già in VRAM → skip load)
+       Esegue scena_1...
+
+t=70s  ARIA Server: scena_1 completata
+       Scrive gpu:result:dias-minipc:job_id_1
+       Watcher minipc: trova risultato → aggiorna dias:state:scene:001
+
+t=140s ARIA Server: scena_2 completata
+       Watcher: aggiorna dias:state:scene:002
+       DIAS Pipeline: capitolo ha tutte voci → avvia Stage E (music)
+```
+
+### Scenario B — Utente inizia a giocare durante elaborazione
+
+```
+t=0s   ARIA Server: sta eseguendo scena_4 (task in PROCESSING)
+t=30s  Utente: click su tray icon → "GPU Occupata"
+       Semaforo → RED
+t=95s  ARIA Server: termina scena_4 (non interrompe)
+       Scrive risultato, poi vede semaforo RED
+       Non consuma scena_5 dalla coda
+       Mantiene Orpheus in VRAM
+
+t+2h   Utente: finisce di giocare → "GPU Disponibile"
+       Semaforo → GREEN
+t+2h+1s ARIA Server: vede GREEN, riprende da scena_5
+        Esegue scena_5, scena_6, ... senza perdere nulla
+```
+
+### Scenario C — PC gaming spento, minipc invia task
+
+```
+t=0s   DIAS Stage C: submit_task(tts, orpheus, payload) → job_id_A
+       Task in gpu:queue:tts:orpheus — Redis scrive OK
+       job_id_A ritorna al client immediatamente
+
+t=0s..t+8h  PC gaming spento, nessun heartbeat
+            Watcher minipc: server OFFLINE, log warning ogni 60s
+            Task in coda, nessun timeout (timeout_seconds=1800 non scattato)
+
+t+8h   PC gaming si accende, ARIA Server avvia
+       Startup: controlla gpu:processing:* → niente (nessun crash)
+       BatchOptimizer: vede task in gpu:queue:tts:orpheus
+       Carica Orpheus, esegue task
+       Scrive risultato
+
+t+8h+70s  Watcher minipc: trova gpu:result:dias-minipc:job_id_A
+          Aggiorna stato DIAS, pipeline continua
+```
+
+### Scenario D — Task con timeout scaduto
+
+```
+timeout_seconds del task: 3600 (1 ora)
+t=0s   submit_task() con queued_at=now
+
+t+1h   Dead Letter Handler (minipc): controlla pending tasks
+       now - queued_at = 3600s = timeout_seconds
+       Task non ancora risultato → sposta in gpu:dead:dias-minipc:job_id
+       Motivo: "TIMEOUT_QUEUED — server non disponibile per 1h"
+
+       DIAS Pipeline: riceve notifica da Watcher → scena marcata come fallita
+       Brain Coordinator: decide se ritentare o skippare la scena
+```
+
+### Scenario E — Due client simultanei (DIAS + laptop)
+
+```
+t=0s   DIAS (minipc): submit_task(tts, orpheus, ...) → job_id_DIAS
+t=1s   Laptop: submit_task(llm, llama-3.1-8b, ...) → job_id_LAPTOP
+
+       Redis:
+         gpu:queue:tts:orpheus  → [task_DIAS]
+         gpu:queue:llm:llama    → [task_LAPTOP]
+
+t=2s   ARIA Server BatchOptimizer:
+         tts:orpheus ha 1 task, llm:llama ha 1 task
+         Orpheus già in VRAM → esegue TTS prima
+
+t=72s  ARIA Server: TTS completato
+         Scrive gpu:result:dias-minipc:job_id_DIAS
+         DIAS Watcher: trova risultato → aggiorna pipeline
+
+       ARIA Server: unload Orpheus, load Llama
+       Esegue task laptop
+
+t=95s  ARIA Server: LLM completato
+         Scrive gpu:result:laptop-client:job_id_LAPTOP
+         Laptop Watcher: trova risultato
+```
+
+**Nota**: i risultati sono in chiavi separate per `client_id`. Il DIAS Watcher
+non vede mai i risultati del laptop e viceversa.
+
+### Scenario F — OOM durante inferenza
+
+```
+t=0s   ARIA Server: carica Flux-dev (12GB stima)
+       VRAM disponibile: 14GB → OK, carica
+       Inizia inferenza immagine 2048x2048
+
+t=5s   torch.cuda.OutOfMemoryError
+       Backend: cattura eccezione
+       Scrive risultato con status="error", error_code="OOM"
+       VRAMManager: torch.cuda.empty_cache() + gc.collect()
+
+       ARIA Server: legge config max_retries=2
+       Rimette task in coda con payload modificato:
+         steps: 30 → 20 (riduzione qualità)
+         width/height: 2048 → 1024 (riduzione risoluzione)
+         retry_count: 1
+       Riprende dal prossimo task in coda
+```
+
+---
+
+## 9. Gestione File Binari
+
+### Il problema
+
+Redis è ottimizzato per dati piccoli (chiavi, metadati, JSON).
+Un WAV audio di 3 minuti pesa ~30MB. Un'immagine 1024x1024 pesa ~3MB.
+Mettere questi file su Redis saturrebbe la memoria e degraderebbe le performance.
+
+### La soluzione: cartella condivisa LAN
+
+Una cartella condivisa tramite Samba (o NFS su Linux) è il canale per i file
+binari. Redis trasporta solo i **path** ai file, non i file stessi.
+
+```
+MINIPC: condivide /mnt/aria-shared/ via Samba come \\minipc\aria-shared
+GAMING PC: mappa \\minipc\aria-shared come Z:\
+
+Struttura:
+/mnt/aria-shared/
+├── voices/                    # Campioni voce per TTS (input)
+│   └── narrator_it.wav
+├── input/                     # Input generici (immagini, audio, documenti)
+│   └── {client_id}/
+├── output/                    # Output dei task (audio, immagini)
+│   └── {client_id}/
+│       └── {book_id}/
+│           ├── voice/
+│           ├── music/
+│           └── images/
+└── models/                    # Modelli scaricati (opzionale, se su NAS)
+```
+
+### Path nei task
+
+Il payload usa `file_refs` con path nel formato del minipc (Linux).
+Il Server converte automaticamente i path usando la mappatura configurata:
+
+```yaml
+# config.yaml ARIA Server
+file_sharing:
+  minipc_base_path: "/mnt/aria-shared"      # come lo vede il minipc
+  server_base_path: "Z:\\"                   # come lo vede il gaming PC
+```
+
+Il Server sostituisce `minipc_base_path` con `server_base_path` prima
+di accedere ai file. Il client non deve preoccuparsi di questa conversione.
+
+### Fallback per ambienti senza condivisione file
+
+Per client che non hanno accesso alla condivisione (device remoti, test),
+ARIA supporta trasferimento file inline via Redis con limite 5MB:
+
+```json
+{
+  "payload": {
+    "voice_sample_inline": "base64encodeddata...",
+    "voice_sample_format": "wav"
+  }
+}
+```
+
+Oltre 5MB il task viene rifiutato con `error_code: FILE_TOO_LARGE_FOR_INLINE`.
+In questo caso il client deve configurare la condivisione file.
+
+---
+
+## 10. Multi-Client: Routing e Isolamento
+
+### Identificazione client
+
+Ogni istanza di ARIAClient ha un `client_id` configurato dall'utente:
+
+```python
+# Su DIAS minipc
+client = ARIAClient(redis_host="192.168.1.10", client_id="dias-minipc")
+
+# Su laptop personale
+client = ARIAClient(redis_host="192.168.1.10", client_id="laptop-personal")
+
+# Su secondo minipc (futuro)
+client = ARIAClient(redis_host="192.168.1.10", client_id="minipc-2")
+```
+
+Il `client_id` deve essere unico sulla rete. Non c'è un registro centrale —
+è responsabilità dell'utente configurarlo correttamente. Se due client usano
+lo stesso `client_id`, i risultati potrebbero essere letti dal client sbagliato.
+
+### Isolamento dei risultati
+
+I risultati sono in chiavi separate per client:
+```
+gpu:result:dias-minipc:job_id_1      ← solo DIAS legge questa
+gpu:result:laptop-personal:job_id_2  ← solo laptop legge questa
+```
+
+Il Watcher di ogni client fa GET solo sulle chiavi con il suo `client_id`.
+Non è necessario autenticazione per questo — l'isolamento è per convenzione
+di naming, non per sicurezza crittografica (siamo su LAN privata).
+
+### Priorità tra client
+
+Non esiste priorità tra client diversi — tutti competono sulla stessa coda
+per tipo modello. Se DIAS e il laptop inviano task TTS contemporaneamente,
+vengono eseguiti in ordine FIFO (salvo campo `priority` del task).
+
+Se in futuro si vuole dare priorità a un client specifico, si possono
+creare code separate per priorità:
+```
+gpu:queue:tts:orpheus:high    # priority 3
+gpu:queue:tts:orpheus:normal  # priority 1-2
+```
+Il BatchOptimizer drena prima la coda high, poi normal. Questa è
+un'ottimizzazione futura — non necessaria per la v1.
+
+---
+
+## 11. API HTTP di ARIA Server
+
+L'API HTTP è **minimale per design**. Non gestisce task — quelli passano
+sempre via Redis. L'API serve solo per:
+- Controllo semaforo
+- Monitoring stato
+- Health check da script e dashboard
+
+**Base URL**: `http://{gaming_pc_ip}:7860`
+
+### Endpoints
+
+```
+GET  /health
+     → 200 OK {"status": "ok", "uptime_seconds": 3642}
+     → Risponde sempre, anche con semaforo RED
+
+GET  /status
+     → {
+         "semaphore": "green",
+         "loaded_model": {"type": "tts", "id": "orpheus-3b"},
+         "vram": {"used_gb": 7.2, "free_gb": 8.8, "total_gb": 16.0},
+         "queues": {
+           "tts:orpheus-3b": 3,
+           "music:musicgen-small": 1,
+           "llm:llama-3.1-8b": 0
+         },
+         "current_task": {"job_id": "...", "client_id": "...", "started_at": "..."},
+         "stats": {
+           "completed_today": 47,
+           "avg_duration_tts_s": 68.2
+         }
+       }
+
+POST /semaphore
+     Body: {"state": "green" | "red"}
+     Headers: X-API-Key: {api_key}
+     → 200 OK {"previous": "green", "current": "red"}
+     → 401 Unauthorized se API key errata
+
+GET  /queue/{model_type}/{model_id}
+     → {"length": 3, "oldest_task_age_seconds": 142}
+
+DELETE /queue/{model_type}/{model_id}/{job_id}
+     Headers: X-API-Key: {api_key}
+     → 200 OK {"cancelled": true}
+     → 404 se task non trovato in coda (potrebbe essere già in processing)
+
+GET  /models
+     → Lista modelli configurati con stato (loaded/unloaded) e VRAM
+```
+
+---
+
+## 12. Configurazione
+
+### config.yaml — ARIA Server
+
+```yaml
+aria:
+  version: "1.0.0"
+  server_id: "gaming-pc-main"
+
+redis:
+  host: "192.168.1.10"          # IP minipc
+  port: 6379
+  password: ""                   # consigliato impostare in produzione
+  db: 0
+  reconnect_interval_seconds: 5
+  max_reconnect_attempts: 0      # 0 = infinito
+
+api:
+  host: "0.0.0.0"
+  port: 7860
+  api_key: "cambia_questa_chiave"
+
+broker:
+  poll_interval_seconds: 2
+  result_ttl_seconds: 86400      # 24h
+  batch_wait_seconds: 5          # attesa prima di caricare modello
+  heartbeat_interval_seconds: 10
+  processing_timeout_seconds: 3600  # task in processing da >1h = crash recovery
+
+semaphore:
+  default_state: "green"
+  red_vram_unload_after_minutes: 30
+
+file_sharing:
+  minipc_base_path: "/mnt/aria-shared"
+  server_base_path: "Z:\\"
+  inline_max_bytes: 5242880      # 5MB
+
+models:
+  tts:
+    orpheus-3b:
+      enabled: true
+      model_path: "C:/models/orpheus-3b-q4"
+      estimated_vram_gb: 7.0
+      max_retries: 2
+    kokoro-v1:
+      enabled: false
+      model_path: "C:/models/kokoro-v1"
+      estimated_vram_gb: 2.0
+      max_retries: 2
+  music:
+    musicgen-small:
+      enabled: true
+      model_path: "C:/models/musicgen-small"
+      estimated_vram_gb: 4.0
+      max_retries: 1
+  llm:
+    llama-3.1-8b:
+      enabled: false
+      model_path: "C:/models/llama-3.1-8b-q4"
+      estimated_vram_gb: 5.5
+      max_retries: 1
+
+logging:
+  level: "INFO"
+  file: "C:/logs/aria-server/aria.log"
+  rotation: "daily"
+  retention_days: 7
+```
+
+### Configurazione ARIAClient (Python)
+
+```python
+# Minima (obbligatoria)
+client = ARIAClient(
+    redis_host="192.168.1.10",
+    client_id="dias-minipc"
+)
+
+# Completa (con tutti i parametri)
+client = ARIAClient(
+    redis_host="192.168.1.10",
+    redis_port=6379,
+    redis_password="",
+    client_id="dias-minipc",
+    default_timeout_seconds=1800,
+    default_priority=1,
+    result_poll_interval_seconds=5,
+    shared_path_local="/mnt/aria-shared",
+    api_base_url="http://192.168.1.20:7860",  # opzionale, solo per semaforo
+    api_key="cambia_questa_chiave"             # opzionale
+)
+```
+
+---
+
+## 13. Sicurezza
+
+### Modello di sicurezza
+
+ARIA è progettato per **reti locali fidate** (casa, piccolo ufficio).
+Non è progettato per essere esposto su internet. Il modello di sicurezza
+è proporzionale a questo contesto.
+
+### Misure implementate
+
+**API Key per operazioni privilegiate**: cambiare semaforo, cancellare task,
+ricaricare modelli. Non richiesta per lettura stato e submit task (Redis gestisce già questo).
+
+**Redis senza accesso esterno**: il firewall del minipc deve bloccare
+la porta 6379 per IP esterni alla LAN. Configurazione Redis:
+`bind 127.0.0.1 192.168.1.10` (solo localhost e LAN).
+
+**Validazione payload**: ogni task è validato contro lo schema prima
+di essere accodato. Payload malformati sono rifiutati con log.
+
+**client_id non autenticato**: su LAN privata, l'isolamento per client_id
+è sufficiente. Non serve autenticazione crittografica per il routing risultati.
+
+### Cosa NON è protetto
+
+- Un client malevolo sulla LAN potrebbe leggere task di altri client
+  (conosce il naming schema delle chiavi Redis)
+- Un client potrebbe inviare task con modelli non configurati (verranno
+  rifiutati ma il tentativo non è autenticato)
+- L'API HTTP è protetta da API key ma non da TLS (HTTP, non HTTPS)
+
+Queste limitazioni sono accettabili su LAN domestica. Per ambienti con
+requisiti di sicurezza maggiori, aggiungere: Redis AUTH, TLS su Redis,
+HTTPS sull'API, autenticazione client_id con token.
+
+---
+
+## 14. Limiti e Vincoli Noti
+
+| Limite | Valore | Motivo |
+|--------|--------|--------|
+| Modelli in VRAM simultanei | 1 (default) | RTX 5060 Ti 16GB |
+| Dimensione file inline Redis | 5MB | Performance Redis |
+| Task in coda per modello | illimitato | Redis list, no cap |
+| Client simultanei | illimitato | isolamento per naming |
+| Formati modello supportati | safetensors, pytorch_model.bin | no GGUF nativo v1 |
+| Sistema operativo server | Windows 10/11 | CUDA su Windows |
+| Sistema operativo client | qualsiasi con Python 3.10+ | solo Redis e stdlib |
+| Comunicazione server-client | Redis su LAN | no internet, no VPN |
+
+### Limitazioni v1 da risolvere in futuro
+
+- **No streaming**: i risultati sono restituiti interamente al completamento.
+  Per LLM, lo streaming token-by-token richiederebbe un canale dedicato
+  (Redis pub/sub o WebSocket). Non implementato in v1.
+
+- **No multi-GPU**: con più GPU il BatchOptimizer dovrebbe gestire
+  assegnazione task per GPU. Non necessario con setup attuale.
+
+- **No modelli GGUF**: richiede llama-cpp-python come dipendenza aggiuntiva.
+  Aggiungibile come backend opzionale in v2.
+
+- **No priorità inter-client**: tutti i client competono alla pari sulla
+  stessa coda FIFO. Priorità intra-task (campo priority) è supportata,
+  priorità tra client non lo è.
+
+---
+
+*ARIA Blueprint v1.0 — Febbraio 2026*
+*Documento funzionale — precede roadmap sviluppo Server e Client*
