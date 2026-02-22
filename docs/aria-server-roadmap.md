@@ -10,10 +10,17 @@
 ## 📋 SOMMARIO PROGRESSI
 
 ### ✅ COMPLETATO
-- (niente ancora)
+- ✅ **Fase AS-1**: Setup Docker + struttura progetto (COMPLETATA)
+- ✅ Repository GitHub creato: https://github.com/NH-Mini/ARIA
+- ✅ Docker container GPU funzionante su PC Gaming 192.168.1.139
+- ✅ RTX 5060 Ti 16GB rilevata correttamente con CUDA 12.1
+- ✅ FastAPI server operativo su porta 8000
+- ✅ Health check endpoint: `/health` con GPU status
+- ✅ TTS API placeholders: `/tts/voices` e `/tts/synthesize`
+- ✅ Workflow Git: sviluppo LXC 190 → push GitHub → pull PC Gaming
 
 ### 🔄 IN CORSO
-- [ ] **Fase AS-1**: Setup ambiente Docker + struttura progetto
+- [ ] **Fase AS-2**: Redis Bridge — connessione e comunicazione
 
 ### 📅 TUTTE LE FASI
 - [ ] **Fase AS-1**: Setup Docker + struttura progetto
@@ -180,7 +187,16 @@ services:
 - [ ] `torch.cuda.is_available()` → True dal container
 - [ ] `main.py` logga connessione Redis OK + CUDA OK
 
-**📅 Stima**: 3-5 giorni
+**✅ Criteri di Successo — COMPLETATI**:
+- ✅ `docker compose up` avvia senza errori
+- ✅ `nvidia-smi` visibile dall'interno del container
+- ✅ `torch.cuda.is_available()` → True dal container
+- ✅ FastAPI server raggiungibile su http://localhost:8000
+- ✅ Health check ritorna GPU disponibile e CUDA 12.1
+- ✅ Repository GitHub privato creato e codice pushato
+- ✅ Struttura progetto completa con test unitari
+
+**📅 Stima**: COMPLETATA (22/02/2026)
 
 ---
 
