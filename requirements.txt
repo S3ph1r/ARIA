@@ -7,7 +7,6 @@ python-multipart==0.0.6
 # GPU/AI
 torch==2.1.0
 torchaudio==2.1.0
---index-url https://download.pytorch.org/whl/cu121
 
 # Audio
 librosa==0.10.1
