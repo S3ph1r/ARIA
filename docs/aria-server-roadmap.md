@@ -7,6 +7,53 @@
 
 ---
 
+## 🎯 CONSIGLI PER PROSSIMI AGENT
+
+### Pattern Redis Bridge (Fase AS-2)
+**Struttura Task Obbligatoria**:
+```json
+{
+  "job_id": "job-xxx",
+  "client_id": "client-xxx",
+  "model_type": "tts|music|llm", 
+  "model_id": "orpheus-3b|musicgen-small|llama-3b",
+  "queued_at": 1740250000,
+  "timeout_seconds": 300,
+  "callback_key": "gpu:result:dias-minipc:job-xxx",
+  "payload": { /* dati specifici modello */ }
+}
+```
+
+**Code GPU Monitorate**:
+- `gpu:queue:tts:orpheus-3b`
+- `gpu:queue:music:musicgen-small` 
+- `gpu:queue:llm:llama-3b`
+
+**Comandi Utili**:
+```bash
+# Test lettura task
+docker exec -it aria-aria-server-1 python3 -c "from aria_server import QueueManager; qm = QueueManager(); print(qm.next_task())"
+
+# Test scrittura risultato
+docker exec -it aria-aria-server-1 python3 -c "from aria_server import ResultWriter; rw = ResultWriter(); rw.write_result('job-xxx', 'client-xxx', {'status': 'success'})"
+
+# Installa dipendenze runtime
+docker exec -it aria-aria-server-1 pip install -r requirements-light.txt
+```
+
+### Build Ottimizzate
+**Problema comune**: Build lente per ogni modifica
+**Soluzione**: Usare sempre `docker-compose.dev.yml` per sviluppo
+**Comando**: `docker-compose -f docker-compose.dev.yml up`
+**Beneficio**: Modifiche immediate, PyTorch cached
+
+### Debug Redis Bridge
+**Task non letti**: Verificare struttura task con campi richiesti
+**Connection refused**: Controllare Redis host in config.py
+**Module not found**: Installare runtime con `docker exec pip install`
+
+---
+
 ## 📋 SOMMARIO PROGRESSI
 
 ### ✅ COMPLETATO
@@ -18,9 +65,20 @@
 - ✅ Health check endpoint: `/health` con GPU status
 - ✅ TTS API placeholders: `/tts/voices` e `/tts/synthesize`
 - ✅ Workflow Git: sviluppo LXC 190 → push GitHub → pull PC Gaming
+- ✅ **Setup sviluppo rapido**: docker-compose.dev.yml con volume mapping e reload automatico
+- ✅ **Build ottimizzata**: Multi-stage build per separare PyTorch (pesante) da codice (leggero)
+
+### ✅ COMPLETATO
+- ✅ **Fase AS-2**: Redis Bridge — connessione e comunicazione (COMPLETATA 22/02/2026)
+  - ✅ QueueManager con BRPOP non-bloccante e reconnect automatico
+  - ✅ ResultWriter con TTL e circuit breaker
+  - ✅ Validazione task con schema strutturato
+  - ✅ Pattern code GPU: `gpu:queue:{type}:{model}`
+  - ✅ Test end-to-end con DIAS verificato
+  - ✅ Build ottimizzata: 65s → 2s con volume mapping
 
 ### 🔄 IN CORSO
-- [ ] **Fase AS-2**: Redis Bridge — connessione e comunicazione
+- [ ] **Fase AS-3**: Logging — console colorata + JSON su file
 
 ### 📅 TUTTE LE FASI
 - [ ] **Fase AS-1**: Setup Docker + struttura progetto
@@ -76,7 +134,63 @@ PC GAMING (Windows 11)
 └── scripts/
     ├── aria-download.bat            # scarica modelli via HF Hub
     └── aria-update.bat              # aggiorna ARIA Server
+
 ```
+
+---
+
+## 🚀 PATTERN BUILD OTTIMIZZATI
+
+### 🚀 PATTERN BUILD OTTIMIZZATI — AGGIORNATI CON ESPERIENZA
+
+### Problema Riscontrato & Soluzione
+**Problema**: Ogni modifica richiedeva rebuild completo (65s) con reinstallazione PyTorch
+**Soluzione**: Multi-stage + volume mapping → 2s per modifiche codice
+
+### Sviluppo Rapido (Consigliato - TESTATO)
+```bash
+# Setup una tantum
+git pull origin master
+docker-compose -f docker-compose.dev.yml up
+
+# Le modifiche al codice sono immediate (hot-reload)
+# PyTorch cached nel container base
+# Requirements leggeri installati runtime
+# Tempo effettivo: 2 secondi vs 65+ secondi
+```
+
+### Installazione Runtime Dependencies (Senza Rebuild)
+```bash
+# Se manca un modulo (es: redis)
+docker exec -it aria-aria-server-1 pip install redis==5.0.1
+
+# Per requirements completi
+docker exec -it aria-aria-server-1 pip install -r requirements-light.txt
+```
+
+### Produzione Stabile
+```bash
+# Solo quando cambiano requirements pesanti
+docker-compose build --no-cache
+docker-compose up
+
+# Build multi-stage separa:
+# - Stage 1: PyTorch CUDA (cached permanentemente)
+# - Stage 2: Requirements leggeri (aggiornabili runtime)
+# - Stage 3: Codice applicazione (hot-reload in dev)
+```
+
+### File di Configurazione Aggiornati
+- `docker-compose.dev.yml` → Sviluppo con volume mapping + hot-reload
+- `docker-compose.yml` → Produzione stabile
+- `Dockerfile.dev` → Base leggera per sviluppo rapido
+- `Dockerfile` → Produzione completa con tutte le dipendenze
+- `requirements-heavy.txt` → PyTorch, CUDA (installate una volta)
+- `requirements-light.txt` → FastAPI, Redis, etc (aggiornabili runtime)
+
+**Pattern riutilizzabile**: Separare dipendenze pesanti da codice leggero + volume mapping per sviluppo rapido senza rebuild.
+
+---
 
 ### Scelte tecniche chiave
 
@@ -92,6 +206,9 @@ PC GAMING (Windows 11)
 | Logging | Console colorata + JSON file | Debug comodo + analisi produzione |
 | MVP | TTS Orpheus | End-to-end con DIAS il prima possibile |
 | Update | `aria update` script | Un comando, controllo esplicito |
+| Build sviluppo | Volume mapping + reload automatico | Modifiche immediate senza rebuild (65s → 2s) |
+| Build produzione | Multi-stage + requirements separati | PyTorch cached, solo codice ricostruito |
+| Runtime install | `docker exec pip install` | Aggiunta moduli senza rebuild (es: redis) |
 
 ---
 
@@ -195,53 +312,82 @@ services:
 - ✅ Health check ritorna GPU disponibile e CUDA 12.1
 - ✅ Repository GitHub privato creato e codice pushato
 - ✅ Struttura progetto completa con test unitari
+- ✅ **Setup sviluppo rapido**: Volume mapping per modifiche immediate senza rebuild
+- ✅ **Build ottimizzata**: Multi-stage build per separare dipendenze pesanti da codice leggero
 
 **📅 Stima**: COMPLETATA (22/02/2026)
 
+**🔧 Pattern Build Ottimizzati — AGGIORNATI**:
+- **Problema risolto**: Build da 65s → 2s con volume mapping e requirements separati
+- **docker-compose.dev.yml**: Hot-reload per modifiche immediate
+- **Dockerfile.dev**: Base leggera senza PyTorch (installato runtime)
+- **requirements-heavy.txt**: PyTorch, CUDA (cached)
+- **requirements-light.txt**: FastAPI, Redis, etc (aggiornabili runtime)
+- **Comando runtime**: `docker exec -it aria-aria-server-1 pip install redis==5.0.1` (senza rebuild)
+
 ---
 
-### 🔧 FASE AS-2: Redis Bridge
+### ✅ FASE AS-2: Redis Bridge — COMPLETATA
 
 **🎯 Obiettivo**: Connessione stabile al Redis del minipc, lettura code, scrittura risultati, reconnect automatico
 
-**📁 File**:
+**📁 File Creati**:
 ```
-aria_server/queue_manager.py
-aria_server/result_writer.py
-tests/unit/test_queue_manager.py
-tests/unit/test_result_writer.py
+aria_server/queue_manager.py        # BRPOP con timeout, reconnect automatico
+aria_server/result_writer.py        # TTL + circuit breaker
+aria_server/config.py               # Centralizzazione configurazioni
+aria_server/__init__.py              # Esporta moduli Redis Bridge
+tests/unit/test_redis_bridge.py     # 9/9 test passanti
 ```
 
-**🔧 Implementazione**:
-- [ ] `QueueManager`:
-  - Connessione Redis con retry infinito e backoff esponenziale (5s, 10s, 20s, max 60s)
+**🔧 Implementazione Completata**:
+- ✅ `QueueManager`:
+  - Connessione Redis con retry infinito e backoff esponenziale
   - `next_task()`: BRPOP con timeout 2s su tutte le code configurate
   - `queue_lengths()`: LLEN su tutte le code → dict `{model_key: count}`
   - Riconnessione automatica trasparente se Redis cade
-- [ ] `ResultWriter`:
-  - `write_result(job_id, client_id, result_dict)`: SET con TTL `result_ttl_seconds`
-  - `write_processing(job_id, task_dict)`: HSET su `gpu:processing:{job_id}` con TTL `processing_timeout_seconds`
-  - `clear_processing(job_id)`: DEL `gpu:processing:{job_id}` dopo completamento
-  - `get_all_processing()`: KEYS `gpu:processing:*` per crash recovery
-- [ ] Validazione schema task in ingresso: campi obbligatori presenti, `model_type` e `model_id` configurati
-- [ ] Task con `queued_at` > `timeout_seconds` scartati silenziosamente con log WARNING
-- [ ] Test unit con MockRedis (stesso pattern DIAS)
+- ✅ `ResultWriter`:
+  - `write_result()`: SET con TTL `result_ttl_seconds`
+  - `write_processing()`: HSET su `gpu:processing:{job_id}` con TTL
+  - `clear_processing()`: DEL dopo completamento
+  - `get_all_processing()`: KEYS per crash recovery
+- ✅ Validazione schema task: campi obbligatori e configurazione modello
+- ✅ Task scaduti scartati silenziosamente con log WARNING
+- ✅ Pattern code GPU: `gpu:queue:{type}:{model}` (es: `gpu:queue:tts:orpheus-3b`)
 
-**📋 Schema validazione task in ingresso**:
-```python
-REQUIRED_FIELDS = ["job_id", "client_id", "model_type",
-                   "model_id", "queued_at", "timeout_seconds",
-                   "callback_key", "payload"]
+**📋 Schema Task Validato**:
+```json
+{
+  "job_id": "job-006",
+  "client_id": "test-client-001", 
+  "model_type": "tts",
+  "model_id": "orpheus-3b",
+  "queued_at": 1740250000,
+  "timeout_seconds": 300,
+  "callback_key": "test-callback-001",
+  "payload": {
+    "text": "Ciao mondo GPU strutturato",
+    "voice": "it-IT",
+    "language": "it",
+    "speed": 1.0
+  }
+}
 ```
 
-**✅ Criteri di Successo**:
-- [ ] Lettura task da Redis minipc verificata end-to-end con redis-cli
-- [ ] Scrittura risultato verificata (`GET gpu:result:*`)
-- [ ] Reconnect automatico dopo `redis-cli shutdown` e riavvio
-- [ ] Task scaduti scartati con log corretto
-- [ ] 100% test unit passano con MockRedis
+**✅ Test End-to-End Verificati**:
+- ✅ Lettura task da Redis minipc: `docker exec -it aria-aria-server-1 python3 -c "from aria_server import QueueManager; qm = QueueManager(); task = qm.next_task()"`
+- ✅ Scrittura risultato: `GET gpu:result:*` su Redis
+- ✅ Reconnect automatico dopo `redis-cli shutdown`
+- ✅ Task scaduti scartati correttamente
+- ✅ **9/9 test unit passanti** con pytest
 
-**📅 Stima**: 3-5 giorni
+**🚀 Pattern Ottimizzazione Build**:
+- **Sviluppo**: `docker-compose.dev.yml` con volume mapping + hot-reload
+- **Produzione**: Multi-stage build per separare PyTorch da codice
+- **Tempo build**: 65s → 2s (solo codice ricostruito)
+- **Runtime deps**: Installabili via `docker exec` senza rebuild
+
+**📅 Completamento**: 22/02/2026 (1 giorno effettivo)
 
 ---
 

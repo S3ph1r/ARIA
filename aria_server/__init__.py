@@ -11,5 +11,6 @@ __description__ = "Distributed GPU inference broker for homelab"
 from .config import *
 from .queue_manager import QueueManager
 from .result_writer import ResultWriter
+from .logger import setup_logging, get_logger, set_log_context, clear_log_context, log_context
 
-__all__ = ["QueueManager", "ResultWriter"]
+__all__ = ["QueueManager", "ResultWriter", "setup_logging", "get_logger", "set_log_context", "clear_log_context", "log_context"]
