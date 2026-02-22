@@ -1,0 +1,32 @@
+# Stage 1: Base dependencies (cached)
+FROM nvidia/cuda:12.1.1-base-ubuntu22.04 AS base
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install ONLY heavy dependencies (PyTorch, CUDA) - RARELY changes
+COPY requirements-heavy.txt .
+RUN pip3 install --no-cache-dir -r requirements-heavy.txt
+
+# Stage 2: Development dependencies (changes occasionally)
+FROM base AS dev-deps
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Stage 3: Application code (changes frequently)
+FROM dev-deps AS app
+COPY . .
+RUN mkdir -p /app/logs
+
+EXPOSE 7860
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python3 -c "import requests; requests.get('http://localhost:7860/health', timeout=5)"
+
+CMD ["python3", "main.py"]
