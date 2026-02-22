@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   aria-server:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile.dev  # Usa Dockerfile.dev leggero
     ports:
       - "8000:8000"
     volumes:
@@ -10,6 +12,9 @@ services:
       - ./aria_server:/app/aria_server
       - ./main.py:/app/main.py
       - ./tests:/app/tests
+      # Mount requirements per installazione locale
+      - ./requirements.txt:/app/requirements.txt
+      - ./requirements-light.txt:/app/requirements-light.txt
     environment:
       - ARIA_HOST=0.0.0.0
       - ARIA_PORT=8000
@@ -22,5 +27,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    # Restart per sviluppo
-    command: python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    # Installa requirements in runtime (solo per dev)
+    command: >
+      bash -c "pip install -r requirements.txt && 
+               python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
