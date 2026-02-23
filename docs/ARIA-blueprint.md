@@ -99,7 +99,9 @@ Il codice è open source e ispezionabile.
 ║  │  Redis Server ◄─────┼──────┼─── legge/scrive code     │  ║
 ║  │  (sempre attivo)    │      │                          │  ║
 ║  └─────────────────────┘      │  RTX 5060 Ti 16GB        │  ║
-║                               └──────────────────────────┘  ║
+║             │                 └──────────────────────────┘  ║
+║             │                               ▲                ║
+║             └──────── SSH (Distrib/CI/CD) ──┘                ║
 ║                                                              ║
 ║  ┌──────────────────┐   ┌───────────────────────────────┐   ║
 ║  │  LAPTOP / altro  │   │  FUTURO: altro device con GPU  │  ║
@@ -107,6 +109,12 @@ Il codice è open source e ispezionabile.
 ║  └──────────────────┘   └───────────────────────────────┘   ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
+
+**Workflow "NH-Mini Distribuito" (Sviluppo & Deploy)**:
+ARIA segue un pattern di sviluppo remoto (CI/CD domestico). Tutto il codice sorgente (Python, Dockerfiles, script) e l'Agent AI risiedono e operano all'interno di un **LXC dedicato (192.168.1.190)** sul Minipc. 
+L'LXC "comanda" il PC Gaming (192.168.1.139) esclusivamente e permanentemente via **SSH**, incaricandolo di eseguire rebuild Docker, lanciare container o leggere i log della GPU, senza che lo sviluppatore debba fisicamente interagire con l'interfaccia di Windows. Questo garantisce che:
+*   Lo sviluppo resti in un ambiente linux isolato (il MiniPC).
+*   Il PC Gaming funzioni puramente come una "GPU as a Service" (o Worker Node) headless.
 
 ### Flusso dati ad alto livello
 

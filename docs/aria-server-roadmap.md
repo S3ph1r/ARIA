@@ -186,17 +186,23 @@ PC GAMING (Windows 11)
 **Problema**: Ogni modifica richiedeva rebuild completo (65s) con reinstallazione PyTorch
 **Soluzione**: Multi-stage + volume mapping → 2s per modifiche codice
 
-### Sviluppo Rapido (Consigliato - TESTATO)
-```bash
-# Setup una tantum
-git pull origin master
-docker-compose -f docker-compose.dev.yml up
+### Sviluppo Rapido Distribuito (Consigliato - TESTATO)
+**Regola d'oro**: Il PC Gaming è la "fabbrica headless", il MiniPC è la "cabina di regia".
+Non è necessario operare fisicamente sull'interfaccia di Windows.
 
-# Le modifiche al codice sono immediate (hot-reload)
-# PyTorch cached nel container base
-# Requirements leggeri installati runtime
-# Tempo effettivo: 2 secondi vs 65+ secondi
+Lo sviluppo avviene sull'LXC 190. Quando il codice è pronto per essere testato sulla GPU:
+```bash
+# Dall'LXC 190, lancia il comando SSH per aggiornare e riavviare il container sul PC Gaming:
+sshpass -p 'MettiLaPassword' ssh gemini@192.168.1.139 "cd C:\Percorso\ARIA && git pull && docker-compose -f docker-compose.dev.yml up -d"
+
+# Per leggere i log della GPU in tempo reale dal MiniPC:
+sshpass -p 'MettiLaPassword' ssh gemini@192.168.1.139 "docker logs -f aria-server-dev"
 ```
+**Benefici**: 
+- Le modifiche al codice sono immediate (hot-reload grazie al volume mapping).
+- PyTorch resta in cache nel container base.
+- Sviluppo 100% remoto, isolato e controllabile programmaticamente dall'Agent AI.
+- Tempo effettivo di deploy: 2 secondi vs 65+ secondi.
 
 ### Installazione Runtime Dependencies (Senza Rebuild)
 ```bash
