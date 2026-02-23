@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CUDA_DOCKER_ARCH=sm_120
 ENV GGML_CUDA=1
 
-# Dipendenze build
+# Dipendenze build + librerie CUDA essenziali
 RUN apt-get update && apt-get install -y \
     git \
     cmake \
@@ -14,16 +14,22 @@ RUN apt-get update && apt-get install -y \
     wget \
     python3 \
     python3-pip \
+    libcublas-dev-12-8 \
+    libcusparse-dev-12-8 \
+    cuda-nvcc-12-8 \
     && rm -rf /var/lib/apt/lists/*
 
 # Build llama.cpp da sorgente con supporto sm_120
+# Usa commit specifico stabile per RTX 5060 Ti
 RUN git clone https://github.com/ggerganov/llama.cpp /llama.cpp && \
     cd /llama.cpp && \
+    git checkout b4452 && \
     cmake -B build \
       -DGGML_CUDA=ON \
       -DCMAKE_CUDA_ARCHITECTURES="120" \
       -DGGML_CUDA_F16=ON \
-      -DCMAKE_BUILD_TYPE=Release && \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 && \
     cmake --build build --config Release -j$(nproc) --target llama-server
 
 # Directory modelli (montata come volume)
