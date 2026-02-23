@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  llama-cpp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.llama-blackwell
+    container_name: aria-llama-cpp-server
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=all
+    volumes:
+      - C:/models/orpheus:/models
+    ports:
+      - "5006:5006"
+    command: /app/start-llama-server.sh
+
+  orpheus-fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: aria-orpheus-fastapi
+    depends_on:
+      - llama-cpp-server
+    ports:
+      - "5005:5005"
+    environment:
+      - ORPHEUS_MODEL_NAME=Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf
+      - ORPHEUS_API_URL=http://llama-cpp-server:5006/v1/completions
+    volumes:
+      - C:/models/orpheus:/models
