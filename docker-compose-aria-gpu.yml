@@ -14,7 +14,7 @@ services:
       - C:/models/orpheus:/models
     ports:
       - "5006:5006"
-    command: /app/start-llama-server.sh
+    command: /start-llama-server.sh
 
   orpheus-fastapi:
     build:
