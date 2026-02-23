@@ -1,6 +1,6 @@
 fastapi==0.129.2
 uvicorn[standard]==0.27.1
-pydantic==2.6.4
+pydantic==2.7.0
 requests==2.31.0
 numpy==1.24.3
 torch==2.1.0
