@@ -1,0 +1,40 @@
+# Base CUDA 12.8 — unica versione compatibile con RTX 5060 Ti (sm_120)
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_DOCKER_ARCH=sm_120
+ENV GGML_CUDA=1
+
+# Dipendenze build
+RUN apt-get update && apt-get install -y \
+    git \
+    cmake \
+    build-essential \
+    libcurl4-openssl-dev \
+    wget \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build llama.cpp da sorgente con supporto sm_120
+RUN git clone https://github.com/ggerganov/llama.cpp /llama.cpp && \
+    cd /llama.cpp && \
+    cmake -B build \
+      -DGGML_CUDA=ON \
+      -DCMAKE_CUDA_ARCHITECTURES="120" \
+      -DGGML_CUDA_F16=ON \
+      -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --config Release -j$(nproc) --target llama-server
+
+# Directory modelli (montata come volume)
+RUN mkdir -p /models
+
+WORKDIR /llama.cpp
+
+# Script di avvio
+COPY start-llama-server.sh /start-llama-server.sh
+RUN chmod +x /start-llama-server.sh
+
+EXPOSE 5006
+
+CMD ["/start-llama-server.sh"]

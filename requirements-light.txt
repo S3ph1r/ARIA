@@ -1,7 +1,0 @@
-# Light dependencies - change frequently
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-redis>=4.0.0
-requests>=2.31.0
-colorlog>=6.7.0

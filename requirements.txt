@@ -1,22 +1,14 @@
-# Core
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
-
-# GPU/AI
+fastapi==0.129.2
+uvicorn[standard]==0.27.1
+pydantic==2.6.4
+requests==2.31.0
+numpy==1.24.3
 torch==2.1.0
-torchaudio==2.1.0
-
-# Audio
-librosa==0.10.1
+transformers==4.36.0
 soundfile==0.12.1
-
-# Utils
-python-dotenv==1.0.0
+librosa==0.10.1
+scipy==1.11.4
 redis==5.0.1
-httpx==0.25.2
-
-# Development
-pytest==7.4.3
-pytest-asyncio==0.21.1
+hiredis==2.2.3
+python-multipart==0.0.9
+aiofiles==23.2.1

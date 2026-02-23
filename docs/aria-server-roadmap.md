@@ -41,6 +41,45 @@ docker exec -it aria-aria-server-1 python3 -c "from aria_server import ResultWri
 docker exec -it aria-aria-server-1 pip install -r requirements-light.txt
 ```
 
+### Build Completa Docker (Fase AS-1 Estesa — 23/02/2026)
+**🎯 Obiettivo Raggiunto**: Immagine Docker completa con tutte le dipendenze embedded, niente reinstallazioni runtime
+
+**📦 Immagine Finale**:
+- **Base**: `nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04` (CUDA 13.0.2, cuDNN, Ubuntu 24.04)
+- **PyTorch**: 2.9.1 con supporto CUDA 13.0 (index-url: https://download.pytorch.org/whl/cu130)
+- **Python**: 3.12 con virtual environment isolato
+- **Framework**: FastAPI 0.129.2, Uvicorn, Pydantic
+- **TTS**: Orpheus Speech (installato via pip)
+- **ML**: Transformers 4.48.0, Accelerate, Datasets
+- **Audio**: SoundFile, Librosa, SciPy
+- **Cache**: Redis 7.2.0, Hiredis
+- **Testing**: Pytest completo con coverage
+- **Debug**: IPDB, DebugPy, Watchdog per hot-reload
+
+**🔧 Problemi Risolti**:
+1. **Ubuntu 24.04 + pip**: Creato virtual environment per evitare "externally-managed-environment"
+2. **CUDA 13.0.2**: Validato su Docker Hub, immagine disponibile e stabile
+3. **PyTorch 2.9.1**: Compatibile con CUDA 13.0 via cu130 index
+4. **Build time**: 25 layer, 1699s totali ma cached per rebuild futuri
+5. **Volume mapping**: Configurato per git pull testing senza reinstallazioni
+
+**📋 Comandi per Test**:
+```bash
+# Build immagine (una tantum)
+docker-compose -f docker-compose.complete.yml build
+
+# Avvio container
+docker-compose -f docker-compose.complete.yml up
+
+# Test GPU
+docker exec aria-server-complete nvidia-smi
+
+# Test PyTorch CUDA
+docker exec aria-server-complete python -c "import torch; print(torch.cuda.is_available())"
+```
+
+**🚀 Prossimi Step**: Test runtime, verifica Orpheus TTS, integrazione con DIAS
+
 ### Build Ottimizzate
 **Problema comune**: Build lente per ogni modifica
 **Soluzione**: Usare sempre `docker-compose.dev.yml` per sviluppo
