@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CUDA_DOCKER_ARCH=sm_120
 ENV GGML_CUDA=1
 
-# Dipendenze build essenziali (senza librerie CUDA specifiche)
+# Dipendenze build essenziali
 RUN apt-get update && apt-get install -y \
     git \
     cmake \
@@ -17,10 +17,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Build llama.cpp da sorgente con supporto sm_120
-# Usa commit specifico stabile per RTX 5060 Ti
+# Usa master branch (più stabile per RTX 5060 Ti)
 RUN git clone https://github.com/ggerganov/llama.cpp /llama.cpp && \
     cd /llama.cpp && \
-    git checkout b4452 && \
     cmake -B build \
       -DGGML_CUDA=ON \
       -DCMAKE_CUDA_ARCHITECTURES="120" \
