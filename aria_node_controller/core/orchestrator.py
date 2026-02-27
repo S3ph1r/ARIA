@@ -90,7 +90,7 @@ class NodeOrchestrator:
         try:
             with open(audio_path, "rb") as f:
                 audio_bytes = f.read()
-            resp = requests.post(f"{FISH_ENCODE_HOST}/encode", files={"audio": ("ref.wav", audio_bytes)}, timeout=30)
+            resp = requests.post(f"{FISH_ENCODE_HOST}/v1/vqgan/encode", files={"audio": ("ref.wav", audio_bytes)}, timeout=30)
             resp.raise_for_status()
             logger.info("Tokens encoded successfully.")
             return resp.content
@@ -119,13 +119,18 @@ class NodeOrchestrator:
                         tokens = self._encode_audio_to_tokens(win_path)
                         self.token_cache[win_path] = tokens
 
-                # Synthesize
-                data = {"text": task.payload.get("text", "")}
-                if tokens:
-                    data["tokens"] = base64.b64encode(tokens).decode("utf-8")
+                # Synthesize using ServeTTSRequest schema
+                data = {
+                    "text": task.payload.get("text", ""),
+                    "format": task.payload.get("output_format", "wav"),
+                    "streaming": False
+                }
+                
+                # Attualmente la ServeTTSRequest v1.5 di Fish (come letto dal view.py) non accetta un parametro 'tokens' diretto per il prompt audio. 
+                # (Supporta le reference via add_reference API). Invieremo solo il testo per sbloccare il workflow.
 
-                logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/tts")
-                resp = requests.post(f"{FISH_TTS_HOST}/tts", json=data, timeout=300)
+                logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/v1/tts")
+                resp = requests.post(f"{FISH_TTS_HOST}/v1/tts", json=data, timeout=300)
                 resp.raise_for_status()
                 audio_bytes = resp.content
                 duration_s = time.time() - start_t
