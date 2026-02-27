@@ -3,7 +3,7 @@
 
 > **Riferimento**: ARIA Blueprint v1.0
 > **Ambiente**: Windows 11, RTX 5060 Ti 16GB, Docker Desktop + GPU passthrough
-> **Obiettivo MVP**: ARIA riceve task TTS Orpheus da DIAS, genera audio, restituisce risultati
+> **Obiettivo MVP**: ARIA riceve task TTS Fish S1-mini da DIAS, genera audio, restituisce risultati
 
 ---
 
@@ -16,7 +16,7 @@
   "job_id": "job-xxx",
   "client_id": "client-xxx",
   "model_type": "tts|music|llm", 
-  "model_id": "orpheus-3b|musicgen-small|llama-3b",
+  "model_id": "fish-s1-mini|musicgen-small|llama-3b",
   "queued_at": 1740250000,
   "timeout_seconds": 300,
   "callback_key": "gpu:result:dias-minipc:job-xxx",
@@ -25,7 +25,7 @@
 ```
 
 **Code GPU Monitorate**:
-- `gpu:queue:tts:orpheus-3b`
+- `gpu:queue:tts:fish-s1-mini`
 - `gpu:queue:music:musicgen-small` 
 - `gpu:queue:llm:llama-3b`
 
@@ -45,8 +45,8 @@ docker exec -it aria-aria-server-1 pip install -r requirements-light.txt
 **🎯 Obiettivo Raggiunto**: Immagine Docker completa con tutte le dipendenze embedded, niente reinstallazioni runtime
 
 **📦 Immagine Finale**:
-- **Base**: `nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04` (CUDA 13.0.2, cuDNN, Ubuntu 24.04)
-- **PyTorch**: 2.9.1 con supporto CUDA 13.0 (index-url: https://download.pytorch.org/whl/cu130)
+- **Base**: `nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04`
+- **PyTorch**: PyTorch nightly cu128 (la versione cu121 non supporta sm_120)
 - **Python**: 3.12 con virtual environment isolato
 - **Framework**: FastAPI 0.129.2, Uvicorn, Pydantic
 - **TTS**: Orpheus Speech (installato via pip)
@@ -125,7 +125,7 @@ docker exec aria-server-complete python -c "import torch; print(torch.cuda.is_av
 - [ ] **Fase AS-3**: Logging — console colorata + JSON su file
 - [ ] **Fase AS-4**: VRAM Manager — load/unload modelli
 - [ ] **Fase AS-5**: Batch Optimizer — priority-first + greedy
-- [ ] **Fase AS-6**: Backend TTS Orpheus — primo backend, MVP
+- [ ] **Fase AS-6**: Backend TTS Fish S1-mini — primo backend, MVP
 - [ ] **Fase AS-7**: Result Writer + Crash Recovery
 - [ ] **Fase AS-8**: API HTTP — semaforo e status
 - [ ] **Fase AS-9**: Dashboard Web — monitoring dettagliato
@@ -138,42 +138,39 @@ docker exec aria-server-complete python -c "import torch; print(torch.cuda.is_av
 
 ---
 
-## 🏗️ ARCHITETTURA SCELTA
+## 🏗️ ARCHITETTURA IBRIDA DEFINITIVA (REFACTOR)
+
+Dopo una fase di esplorazione tra container Linux isolati, container Docker su Windows WSL2 e ambienti Conda nativi per Fish Speech, l'architettura è stata consolidata in **due pacchetti software distinti**:
+
+### 1. ARIA Client (LXC 120 / Linux)
+Una libreria Python leggera che gira all'interno dell'infrastruttura DIAS. 
+- **Setup**: Inclusa nativamente nelle dipendenze di DIAS o deployata come container LXC autonomo se necessaria come router centrale.
+- **Ruolo**: Invia richieste JSON tramite Redis (CT120) e riceve i risultati audio/generati via `/mnt/aria-shared`. Non ha bisogno di GPU. 
+
+### 2. ARIA Node Controller & Server (PC Gaming / Windows)
+Un **programma nativo Windows integrato (All-in-One)**. L'obiettivo finale è avere un installer `.exe` o uno script PowerShell di setup che prepari l'intero ambiente per l'utente Windows senza richiedere comandi manuali complessi.
+- **Node Controller (Tray App)**: L'interfaccia utente (System Tray Icon + Impostazioni) per gestire il "Semaforo" (Gaming Mode).
+- **Process Manager**: Il Node Controller fa da demone e avvia/spegne automaticamente in background i server di inferenza (Llama.cpp p.5007) solo quando ARIA è attivo.
+- **Orchestratore (ex `main.py` di Linux)**: Il ciclo di fetch da Redis e il `BatchOptimizer` vengono spostati sotto il Node Controller su Windows. Questo garantisce che la coda venga consumata solo se il PC Gaming è acceso, il Controller in esecuzione e la GPU libera.
+
+### 2b. Processi Windows Nativi (Fish S1-mini)
+Due server devono girare nativamente su Windows, avviati automaticamente via Task Scheduler prima che Docker parta:
+1. **Fish Voice Cloning**: su porta `8081` (ambiente conda `fish-voice-cloning`, usa CPU, espone endpoint `/encode` per generare i token `.npy` dai WAV).
+2. **Fish Speech TTS**: su porta `8080` (ambiente conda `fish-speech`, usa PyTorch nightly cu128 + GPU, riceve testo e token `.npy` e genera l'audio finale).
 
 ```
-PC GAMING (Windows 11)
-├── Docker Desktop (WSL2 backend + nvidia-container-toolkit)
-│   └── container: aria-server
-│       ├── main.py                  # orchestratore principale
-│       ├── queue_manager.py         # BRPOP da Redis minipc
-│       ├── batch_optimizer.py       # priority-first → greedy
-│       ├── vram_manager.py          # load/unload + OOM handling
-│       ├── result_writer.py         # scrive risultati + circuit breaker
-│       ├── heartbeat.py             # pubblica stato ogni 10s
-│       ├── backends/
-│       │   ├── base_backend.py      # interfaccia astratta
-│       │   ├── tts_backend.py       # Orpheus TTS (MVP)
-│       │   ├── music_backend.py     # MusicGen (fase 13)
-│       │   └── llm_backend.py       # LLM testuali (fase 14)
-│       └── api/
-│           └── http_api.py          # FastAPI: semaforo + status + dashboard
+PC GAMING (Windows 11) - ARIA NODE
+├── Processi Nativi Windows (Avvio via Task Scheduler)
+│   ├── conda env fish-voice-cloning: server su 0.0.0.0:8081 (CPU, /encode)
+│   └── conda env fish-speech: server su 0.0.0.0:8080 (GPU, /tts)
 │
-├── aria-tray/                       # processo separato (fuori Docker)
-│   └── tray_icon.py                 # pystray, chiama API HTTP locale
+├── ARIA Windows Node Controller (App GUI / Tray)
+│   ├── Legge Redis (IP configurabile da GUI)
+│   ├── Decide se cambiare modello (Batch Optimizer)
+│   ├── Accende/Spegne Processi Locali in base alla necessità (es. Llama.cpp)
 │
-├── C:\models\                       # modelli scaricati con aria download
-│   ├── orpheus-3b-q4/
-│   └── musicgen-small/
-│
-├── Z:\  (← \\minipc\aria-shared)   # cartella Samba montata
-│   ├── voices/
-│   ├── input/
-│   └── output/
-│
-└── scripts/
-    ├── aria-download.bat            # scarica modelli via HF Hub
-    └── aria-update.bat              # aggiorna ARIA Server
-
+├── C:\models\                       # Modelli AI
+└── Z:\  (← \\minipc\aria-shared)   # I/O File Binari
 ```
 
 ---
@@ -583,64 +580,36 @@ DECISIONE: carica Orpheus
 
 ---
 
-### 🔧 FASE AS-6: Backend TTS Orpheus — MVP
+### 🔧 FASE AS-6: Backend TTS Fish S1-mini — MVP
 
-**🎯 Obiettivo**: Primo backend reale — inferenza Orpheus TTS, produzione WAV, integrazione completa con la pipeline. Questo è il punto in cui ARIA diventa funzionante end-to-end con DIAS.
+**🎯 Obiettivo**: Primo backend reale — integrazione di Fish S1-mini (abbandonando Orpheus), produzione WAV, workflow completo con la pipeline DIAS.
 
 **📁 File**:
 ```
-aria_server/backends/tts_backend.py
-tests/unit/test_tts_backend_mock.py
-tests/integration/test_tts_orpheus_real.py
+aria_server/backends/fish_tts.py
+tests/integration/test_fish_tts.py
 ```
 
 **🔧 Prerequisiti** (da completare prima di sviluppare):
-- [ ] Scaricare modello: `aria-download.bat orpheus-3b` (implementato in AS-11, o manuale HF Hub)
-- [ ] Verificare modello in `C:\models\orpheus-3b-q4\`
-- [ ] Campione voce narratore: `Z:\voices\narrator_it.wav` (WAV 48kHz mono, 3-30s)
+- [ ] I server API di Fish (cloning su porta 8081 ed engine su porta 8080) devono essere attivi su Windows avviati da Task Scheduler.
 - [ ] Samba share montata come `Z:\` (implementato in AS-15, o montata manualmente)
 
 **🔧 Implementazione**:
-- [ ] `OrpheusBackend(BaseBackend)`:
-  - `load()`: carica modello da `/models/orpheus-3b-q4/` con `transformers`, device=cuda
-  - `unload()`: `self._model = None`, `self._tokenizer = None`, `torch.cuda.empty_cache()`, `gc.collect()`
-  - `estimated_vram_gb()` → 7.0
+- [ ] `FishTTSBackend(BaseBackend)` (Dettagli in `fish-tts-backend.md`):
+  - `load()` / `unload()`: vuoti, la gestione VRAM è delegata al server API nativo Windows.
   - `run(payload)`:
-    - Legge `payload.text` (già annotato con tag Orpheus da DIAS TextDirector)
-    - Legge campione voce da `payload.voice_sample_path` (path su `/aria-shared/`)
-    - Applica `pace_factor`: aggiunge `<slow>` o `<fast>` prefix se fuori range 0.85-1.15
-    - Esegue inferenza Orpheus
-    - Se testo >280 parole: chunking per frase + crossfade 80ms con FFmpeg
-    - Salva WAV 48kHz mono in `payload.output_path` (path su `/aria-shared/`)
-    - Ritorna `{output_path, duration_seconds, sample_rate: 48000}`
-- [ ] `MockTTSBackend`: ritorna WAV silenzioso di durata proporzionale alla lunghezza testo
-- [ ] Gestione `torch.cuda.OutOfMemoryError`: dimezza chunk size, retry automatico
-- [ ] Unit test con MockTTSBackend (no GPU)
-- [ ] Integration test su GPU reale con paragrafo di esempio italiano
-
-**📋 Payload Orpheus atteso**:
-```json
-{
-  "text": "leah: Aprì la porta lentamente. <gasp> Non c'era nessuno.",
-  "voice_name": "leah",
-  "voice_sample_path": "/aria-shared/voices/narrator_it.wav",
-  "pace_factor": 0.82,
-  "output_path": "/aria-shared/output/dias-minipc/book_123/scene_001.wav",
-  "output_format": "wav",
-  "sample_rate": 48000,
-  "channels": 1
-}
-```
+    - Riceve task da Redis per `gpu:queue:tts:fish-s1-mini`.
+    - Controlla cache in memoria per la voce richiesta; se non presente, chiama `http://host.docker.internal:8081/encode` inviando l'audio reference WAV per ottenere i token `.npy` e lo mette in cache.
+    - Chiama `http://host.docker.internal:8080/tts` passando testo e i token `.npy`.
+    - Salva il WAV risultante su Samba (`/mnt/aria-shared/...`).
+    - Scrive il risultato testuale/JSON finale di nuovo in Redis.
 
 **✅ Criteri di Successo — MVP**:
-- [ ] WAV generato correttamente in `/aria-shared/output/`
-- [ ] Tag emotivi (`<gasp>`, `<sigh>`) presenti nell'audio
-- [ ] Chunking corretto per scene >280 parole
-- [ ] Voice cloning fedele al campione fornito
-- [ ] Processing time < 2x realtime su RTX 5060 Ti
-- [ ] **Test end-to-end con DIAS**: Stage C invia task → ARIA genera WAV → Watcher aggiorna stato ✅
+- [ ] WAV generato correttamente in `/aria-shared/output/`.
+- [ ] Voice cloning fedele al campione fornito grazie a Fish S1-mini.
+- [ ] **Test end-to-end con DIAS**: Task TTS immesso in Redis arriva al backend Python che parla con i microservizi Windows e restituisce il path.
 
-**📅 Stima**: 2 settimane
+**📅 Stima**: 1-2 settimane
 
 ---
 
@@ -752,48 +721,38 @@ api/http_api.py            (aggiunge route /dashboard)
 
 ---
 
-### 🔧 FASE AS-10: Tray Icon
+### 🔧 FASE AS-10: ARIA Windows Node Controller (Tray Icon & Orchestrator)
 
-**🎯 Obiettivo**: Icona system tray Windows per controllo semaforo rapido senza aprire browser — processo separato dal container Docker
+**🎯 Obiettivo**: Consolidare l'Orchestratore Redis e i vari backend in un'unica applicazione nativa Windows con Tray Icon per il controllo semaforo e la gestione trasparente dei processi GPU. Sostituisce l'approccio dispersivo basato su multipli container e script.
 
-**📁 File**:
+**📁 File (in `aria_node_controller/`)**:
 ```
-aria-tray/
-├── tray_icon.py
-├── requirements-tray.txt    (pystray, Pillow, requests)
-└── install-tray-service.bat
+main_tray.py                # Entry point con pystray
+settings_gui.py             # Interfaccia grafica CustomTkinter
+core/
+ ├── process_manager.py     # Gestisce i subprocess (Llama, Fish)
+ ├── queue_consumer.py      # Dialoga con Redis (il vecchio main.py)
+ └── backend_router.py      # Instrada il task locale alla porta HTTP giusta
+installer/
+ └── install_aria.ps1       # Script One-Click per scaricare miniconda e dipendenze
 ```
-
-> **Nota**: La tray icon gira come processo Python nativo Windows (fuori Docker)
-> perché Docker non ha accesso alla GUI di Windows. Chiama l'API HTTP di ARIA Server.
 
 **🔧 Implementazione**:
-- [ ] `pystray` + `Pillow` per icona dinamica nella system tray
-- [ ] Icona con colore dinamico generata con Pillow:
-  - 🟢 Verde: semaforo green
-  - 🔴 Rosso: semaforo red
-  - 🟡 Giallo: task in esecuzione (busy)
-  - ⚫ Grigio: server offline
-- [ ] Aggiornamento stato ogni 5s via `GET /status`
-- [ ] Menu click destro:
-  - "🟢 GPU Disponibile" (→ `POST /semaphore green`)
-  - "🔴 GPU Occupata" (→ `POST /semaphore red`)
-  - Separatore
-  - "📊 Apri Dashboard" (→ apre browser su `localhost:7860/dashboard`)
-  - "ℹ️ Stato: {modello caricato, VRAM usata}"
-  - Separatore
-  - "❌ Esci"
-- [ ] Tooltip hover: "{semaphore} — {n} task in coda — VRAM {x}GB/{y}GB"
-- [ ] Si avvia automaticamente con Windows (registro startup o Task Scheduler)
-- [ ] `install-tray-service.bat`: configura avvio automatico
+- [ ] Creare GUI in `customtkinter` per configurare configurare l'IP di Redis (CT120), Samba Path e autostart.
+- [ ] Implementare icona `pystray` dinamica:
+  - 🟢 Verde: Semaforo green, GPU ascolta Redis.
+  - 🔴 Rosso: Gaming Mode, GPU in pausa.
+- [ ] Spostare l'orchestrazione (`main.py` e `queue_manager.py`) dentro il Node Controller in modo che sia l'app Windows a ritirare i task da CT120.
+- [ ] `process_manager.py`: Avvia e ferma i webserver python di Fish o exe di Llama.cpp al bisogno (liberando VRAM quando in idle o Gaming Mode).
+- [ ] Script di startup intelligente: configurare un task nel Task Scheduler di Windows per avviare il Controller all'avvio.
 
 **✅ Criteri di Successo**:
-- [ ] Icona visibile nella system tray al boot Windows
-- [ ] Colore cambia entro 5s quando semaforo cambia
-- [ ] Click "GPU Occupata" → semaforo red verificato su Redis
-- [ ] "Apri Dashboard" apre il browser correttamente
+- [ ] Doppio click sul file: l'icona appare nel tray.
+- [ ] Cambiando il semaforo a Rosso tramite UI, Redis SMEMBERS `aria:gpu:semaphore` viene aggiornato.
+- [ ] L'Orchestratore nel Node Controller non ritira nulla finché il PC gioca.
+- [ ] L'Installer prepara gli ambienti in automatico su una macchina pulita senza dover digitare comandi da amministratore.
 
-**📅 Stima**: 1 settimana
+**📅 Stima**: 1-2 settimane
 
 ---
 
