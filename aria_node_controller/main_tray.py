@@ -8,9 +8,12 @@ from pystray import MenuItem as item
 import redis
 
 from settings_gui import load_settings, open_settings_window
+from core.orchestrator import NodeOrchestrator
+from core.config_manager import refresh_config
 
 SEMAPHORE_GREEN = True
 redis_client = None
+orchestrator = None
 
 def init_redis():
     global redis_client
@@ -42,7 +45,10 @@ def init_redis():
         redis_client = None
 
 def update_redis_semaphore(state: bool):
-    global redis_client
+    global redis_client, orchestrator
+    if orchestrator:
+        orchestrator.set_semaphore(state)
+        
     if redis_client:
         try:
             redis_client.set("aria:gpu:semaphore", "green" if state else "red")
@@ -93,18 +99,31 @@ def _open_settings_thread(icon):
     # Faremo girare la GUI in un thread separato o subprocess. Poiché pystray e tkinter nello stesso processo 
     # possono dare problemi su MacOS (ma su Windows di solito no), proviamo in un thread.
     print("Apertura impostazioni...")
-    open_settings_window(on_save_callback=lambda s: init_redis())
+    def on_save(s):
+        refresh_config()
+        init_redis()
+    open_settings_window(on_save_callback=on_save)
 
 def menu_action_settings(icon, item):
     threading.Thread(target=_open_settings_thread, args=(icon,), daemon=True).start()
 
 def menu_action_exit(icon, item):
+    global orchestrator
+    if orchestrator:
+        orchestrator.stop()
     icon.stop()
 
 def setup(icon):
+    global orchestrator
     icon.visible = True
     # Init redis at startup
     init_redis()
+    
+    # Avvia l'orchestratore in background
+    orchestrator = NodeOrchestrator()
+    orchestrator.set_semaphore(SEMAPHORE_GREEN)
+    orchestrator.start()
+    
     # Correct the initial icon based on redis state
     color = "green" if SEMAPHORE_GREEN else "red"
     icon.icon = generate_icon_image(color)
