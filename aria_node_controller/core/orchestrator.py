@@ -66,6 +66,7 @@ class NodeOrchestrator:
 
                 next_model_id, queue_key = decision
                 if current_model != next_model_id:
+                    print(f"DEBUG: Switching batch focus to model: {next_model_id} (queue: {queue_key})")
                     logger.info(f"Switching batch focus to model: {next_model_id} (queue: {queue_key})")
                     current_model = next_model_id
 
@@ -74,10 +75,13 @@ class NodeOrchestrator:
                 if not payload:
                     continue  # Timeout o vuota
 
+                print(f"DEBUG: Processando task {payload.job_id} for {payload.model_id}")
+
                 logger.info(f"Processing task {payload.job_id} for {payload.model_id}")
                 self._process_task(payload)
 
             except Exception as e:
+                print(f"CRITICAL ERROR in orchestrator loop: {e}")
                 logger.error("Error in orchestrator loop", exc_info=True)
                 time.sleep(5)
 
@@ -86,7 +90,7 @@ class NodeOrchestrator:
         try:
             with open(audio_path, "rb") as f:
                 audio_bytes = f.read()
-            resp = requests.post(f"{FISH_ENCODE_HOST}/encode_audio", files={"audio": ("ref.wav", audio_bytes)}, timeout=30)
+            resp = requests.post(f"{FISH_ENCODE_HOST}/encode", files={"audio": ("ref.wav", audio_bytes)}, timeout=30)
             resp.raise_for_status()
             logger.info("Tokens encoded successfully.")
             return resp.content
@@ -120,8 +124,8 @@ class NodeOrchestrator:
                 if tokens:
                     data["tokens"] = base64.b64encode(tokens).decode("utf-8")
 
-                logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/synthesize")
-                resp = requests.post(f"{FISH_TTS_HOST}/synthesize", json=data, timeout=300)
+                logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/tts")
+                resp = requests.post(f"{FISH_TTS_HOST}/tts", json=data, timeout=300)
                 resp.raise_for_status()
                 audio_bytes = resp.content
                 duration_s = time.time() - start_t
