@@ -111,8 +111,7 @@ class NodeOrchestrator:
                 
                 if voice_sample_path:
                     # Riscrivi il percorso Samba per renderlo compatibile con Z:\ (Windows)
-                    # Es: /aria-shared/voices/narrator_it.wav -> Z:\voices\narrator_it.wav
-                    win_path = voice_sample_path.replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
+                    win_path = voice_sample_path.replace("/mnt/aria-shared/", SAMBA_PATH).replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
                     
                     if win_path in self.token_cache:
                         tokens = self.token_cache[win_path]
@@ -149,7 +148,7 @@ class NodeOrchestrator:
                 # Save Output
                 out_path = task.payload.get("output_path", "")
                 if out_path:
-                    win_out_path = out_path.replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
+                    win_out_path = out_path.replace("/mnt/aria-shared/", SAMBA_PATH).replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
                     os.makedirs(os.path.dirname(win_out_path), exist_ok=True)
                     with open(win_out_path, "wb") as f:
                         f.write(audio_bytes)
