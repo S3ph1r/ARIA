@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import requests
@@ -126,12 +127,22 @@ class NodeOrchestrator:
                     "streaming": False
                 }
                 
-                # Attualmente la ServeTTSRequest v1.5 di Fish (come letto dal view.py) non accetta un parametro 'tokens' diretto per il prompt audio. 
-                # (Supporta le reference via add_reference API). Invieremo solo il testo per sbloccare il workflow.
+                # Aggiungiamo il token vocale decodificato come riferimento per il Voice Cloning
+                if tokens:
+                    import base64
+                    b64_str = base64.b64encode(tokens).decode("utf-8")
+                    data["references"] = [{
+                        "audio": b64_str,
+                        "text": task.payload.get("voice_ref_text", "Sample voice audio reference")
+                    }]
 
                 logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/v1/tts")
                 resp = requests.post(f"{FISH_TTS_HOST}/v1/tts", json=data, timeout=300)
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except requests.exceptions.HTTPError as e:
+                    logger.error(f"HTTP Error {e.response.status_code} from Fish TTS Server. Response text: {e.response.text}")
+                    raise
                 audio_bytes = resp.content
                 duration_s = time.time() - start_t
                 
