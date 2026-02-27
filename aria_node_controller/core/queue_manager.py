@@ -77,8 +77,13 @@ class AriaQueueManager:
         if not result:
             return None, None
             
-        _, raw_json_bytes = result
-        raw_json_str = raw_json_bytes.decode('utf-8')
+        _, raw_json_data = result
+        
+        # Support both decode_responses=True|False
+        if isinstance(raw_json_data, bytes):
+            raw_json_str = raw_json_data.decode('utf-8')
+        else:
+            raw_json_str = raw_json_data
         
         try:
             task = AriaTaskPayload.model_validate_json(raw_json_str)
