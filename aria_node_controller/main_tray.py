@@ -10,6 +10,7 @@ import redis
 from settings_gui import load_settings, open_settings_window
 from core.orchestrator import NodeOrchestrator
 from core.config_manager import refresh_config
+from core.logger import setup_logging
 
 SEMAPHORE_GREEN = True
 redis_client = None
@@ -142,6 +143,7 @@ def create_menu():
     )
 
 def main():
+    setup_logging()
     initial_icon = generate_icon_image("gray")
     
     icon = pystray.Icon(
