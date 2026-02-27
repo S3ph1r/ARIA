@@ -149,7 +149,11 @@ class NodeOrchestrator:
                 out_path = task.payload.get("output_path", "")
                 if out_path:
                     win_out_path = out_path.replace("/mnt/aria-shared/", SAMBA_PATH).replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
-                    os.makedirs(os.path.dirname(win_out_path), exist_ok=True)
+                    try:
+                        os.makedirs(os.path.dirname(win_out_path), exist_ok=True)
+                    except PermissionError:
+                        logger.warning(f"Ignored PermissionError gracefully on os.makedirs for {os.path.dirname(win_out_path)}")
+                        
                     with open(win_out_path, "wb") as f:
                         f.write(audio_bytes)
                     logger.info(f"Wrote generated WAV to {win_out_path}")
