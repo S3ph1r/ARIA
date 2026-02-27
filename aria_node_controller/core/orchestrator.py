@@ -151,28 +151,15 @@ class NodeOrchestrator:
                     win_out_path = out_path.replace("/mnt/aria-shared/", SAMBA_PATH).replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
                     out_dir = os.path.dirname(win_out_path)
                     
-                    # Funzione sicura per drive mappati Windows (WinError 5 su Z:\)
-                    # Separiamo il drive letter (es: Z:\) dal resto del percorso (es: output\...)
-                    drive, tail = os.path.splitdrive(out_dir)
+                    # Normalizziamo il percorso per le policy UNC / Mapped Network Drives di Windows
+                    out_dir = os.path.normpath(out_dir)
                     
-                    if drive:
-                        # Assicuriamoci di aggiungere lo slash al drive per poter fare join corretti
-                        curr_path = drive + os.sep
-                        # Scorriamo le singole directory da creare dentro tail
-                        folders = [f for f in tail.split(os.sep) if f]
-                        
-                        for folder in folders:
-                            curr_path = os.path.join(curr_path, folder)
-                            try:
-                                if not os.path.exists(curr_path):
-                                    os.mkdir(curr_path)
-                            except PermissionError:
-                                logger.warning(f"Ignored PermissionError gracefully on os.mkdir for {curr_path}")
-                            except FileExistsError:
-                                pass
-                    else:
-                        # Fallback standard per filesystem normali (non reti Windows)
+                    try:
                         os.makedirs(out_dir, exist_ok=True)
+                    except Exception as e:
+                        # Ignoriamo graziosamente eventuali eccezioni di permesso sulle radici di Rete (Z:\)
+                        # che potrebbero bloccare os.makedirs, sperando che le sottodirectory finali siano accessibili
+                        logger.warning(f"Ignored expected exception during directory creation for {out_dir}: {e}")
 
                     with open(win_out_path, "wb") as f:
                         f.write(audio_bytes)
