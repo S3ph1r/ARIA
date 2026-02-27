@@ -148,18 +148,26 @@ class NodeOrchestrator:
                 # Save Output
                 out_path = task.payload.get("output_path", "")
                 if out_path:
+                    from pathlib import Path
                     win_out_path = out_path.replace("/mnt/aria-shared/", SAMBA_PATH).replace("/aria-shared/", SAMBA_PATH).replace("/", "\\")
-                    out_dir = os.path.dirname(win_out_path)
-                    
-                    # Normalizziamo il percorso per le policy UNC / Mapped Network Drives di Windows
-                    out_dir = os.path.normpath(out_dir)
                     
                     try:
-                        os.makedirs(out_dir, exist_ok=True)
+                        # Pathlib gestisce in modo eccellente i Mount Point Samba su Windows (Z:\) 
+                        # ignorando i PermissionError passivi alla radice.
+                        Path(win_out_path).parent.mkdir(parents=True, exist_ok=True)
                     except Exception as e:
-                        # Ignoriamo graziosamente eventuali eccezioni di permesso sulle radici di Rete (Z:\)
-                        # che potrebbero bloccare os.makedirs, sperando che le sottodirectory finali siano accessibili
-                        logger.warning(f"Ignored expected exception during directory creation for {out_dir}: {e}")
+                        logger.warning(f"Pathlib could not silently bypass Samba root perms, falling back... ({e})")
+                        # Fallback manuale finale per saltare il drive (se pathlib dovesse piangere)
+                        drive, tail = os.path.splitdrive(os.path.dirname(win_out_path))
+                        if drive:
+                            curr_path = drive + os.sep
+                            for folder in [f for f in tail.split(os.sep) if f]:
+                                curr_path = os.path.join(curr_path, folder)
+                                try:
+                                    if not os.path.exists(curr_path):
+                                        os.mkdir(curr_path)
+                                except Exception:
+                                    pass
 
                     with open(win_out_path, "wb") as f:
                         f.write(audio_bytes)
