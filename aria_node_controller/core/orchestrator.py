@@ -9,15 +9,17 @@ from .batch_optimizer import BatchOptimizer
 from .logger import get_logger
 from .config_manager import SAMBA_PATH
 
+from .models import AriaTaskResult
+
 logger = get_logger("node.orchestrator")
 
 FISH_TTS_HOST = "http://localhost:8080"
 FISH_ENCODE_HOST = "http://localhost:8081"
 
 class NodeOrchestrator:
-    def __init__(self):
-        self.qm = AriaQueueManager()
-        self.optimizer = BatchOptimizer()
+    def __init__(self, redis_client):
+        self.qm = AriaQueueManager(redis_client)
+        self.optimizer = BatchOptimizer(redis_client)
         self.running = False
         self.thread = None
         
@@ -46,6 +48,9 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         current_model = None
+        known_models = {
+            "fish-s1-mini": BatchOptimizer.build_queue_key("tts", "fish-s1-mini")
+        }
         
         while self.running:
             if not self.semaphore_green:
@@ -53,22 +58,19 @@ class NodeOrchestrator:
                 continue
 
             try:
-                # 1. Recupera lunghezze code
-                queue_lens = self.qm.queue_lengths()
-                
-                # 2. Decide if we need to switch model priority
-                if not current_model or self.optimizer.should_switch(current_model, queue_lens):
-                    next_model = self.optimizer.next_model(queue_lens, current_model)
-                    if next_model:
-                        logger.info(f"Switching batch focus to model: {next_model}")
-                        current_model = next_model
-
-                if not current_model:
+                # 1. Ask optimizer for next queue
+                decision = self.optimizer.decide_next_queue(known_models, current_model)
+                if not decision:
                     time.sleep(1)
                     continue
 
-                # 3. Consuma e Processa il Task
-                payload = self.qm.next_task(model_key=current_model)
+                next_model_id, queue_key = decision
+                if current_model != next_model_id:
+                    logger.info(f"Switching batch focus to model: {next_model_id} (queue: {queue_key})")
+                    current_model = next_model_id
+
+                # 2. Consuma e Processa il Task
+                raw_json, payload = self.qm.fetch_task(queue_key, timeout=2)
                 if not payload:
                     continue  # Timeout o vuota
 
@@ -93,6 +95,7 @@ class NodeOrchestrator:
             raise
 
     def _process_task(self, task):
+        start_t = time.time()
         # Questo è specifico per fish-s1-mini per ora. 
         # In base al tipo di task chiameremo processi diversi (es. Llama su p.5007)
         if task.model_id == "fish-s1-mini":
@@ -118,7 +121,6 @@ class NodeOrchestrator:
                     data["tokens"] = base64.b64encode(tokens).decode("utf-8")
 
                 logger.info(f"Requesting TTS Synthesis to Fish Server at {FISH_TTS_HOST}/synthesize")
-                start_t = time.time()
                 resp = requests.post(f"{FISH_TTS_HOST}/synthesize", json=data, timeout=300)
                 resp.raise_for_status()
                 audio_bytes = resp.content
@@ -134,33 +136,28 @@ class NodeOrchestrator:
                     logger.info(f"Wrote generated WAV to {win_out_path}")
 
                 # Rispondi a Redis
-                self.qm.result_writer.write_result(
+                result = AriaTaskResult(
                     job_id=task.job_id,
                     client_id=task.client_id,
-                    result_data={
-                        "job_id": task.job_id,
-                        "model_id": task.model_id,
-                        "status": "done",
-                        "output": {
-                            "output_path": out_path,
-                            "duration_seconds": duration_s
-                        }
-                    },
-                    callback_key=task.callback_key
+                    model_type=task.model_type,
+                    model_id=task.model_id,
+                    status="done",
+                    processing_time_seconds=duration_s,
+                    output={"output_path": out_path, "duration_seconds": duration_s}
                 )
+                self.qm.post_result(task, result)
             
             except Exception as e:
                 logger.error(f"Task Failed: {e}", exc_info=True)
-                self.qm.result_writer.write_result(
+                result = AriaTaskResult(
                     job_id=task.job_id,
                     client_id=task.client_id,
-                    result_data={
-                        "job_id": task.job_id,
-                        "model_id": task.model_id,
-                        "status": "error",
-                        "error_message": str(e)
-                    },
-                    callback_key=task.callback_key
+                    model_type=task.model_type,
+                    model_id=task.model_id,
+                    status="error",
+                    processing_time_seconds=time.time() - start_t,
+                    error=str(e)
                 )
+                self.qm.post_result(task, result)
         else:
             logger.warning(f"Unsupported model_id: {task.model_id}")

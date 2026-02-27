@@ -120,9 +120,12 @@ def setup(icon):
     init_redis()
     
     # Avvia l'orchestratore in background
-    orchestrator = NodeOrchestrator()
-    orchestrator.set_semaphore(SEMAPHORE_GREEN)
-    orchestrator.start()
+    if redis_client:
+        orchestrator = NodeOrchestrator(redis_client)
+        orchestrator.set_semaphore(SEMAPHORE_GREEN)
+        orchestrator.start()
+    else:
+        print("Redis non disponibile all'avvio: Orchestrator non avviato.")
     
     # Correct the initial icon based on redis state
     color = "green" if SEMAPHORE_GREEN else "red"
