@@ -9,7 +9,7 @@ DEFAULT_SETTINGS = {
     "redis_host": "192.168.1.120",
     "redis_port": 6379,
     "redis_password": "",
-    "samba_path": "Z:\\",
+    "node_ip": "",  # Vuoto = auto-detect IP dalla scheda di rete
     "autostart": False
 }
 
@@ -57,15 +57,15 @@ class SettingsWindow(ctk.CTk):
         self.entry_redis_port.insert(0, str(self.settings["redis_port"]))
         self.entry_redis_port.pack(anchor="w", padx=10, pady=5)
         
-        # Samba Path
-        self.frame_samba = ctk.CTkFrame(self)
-        self.frame_samba.pack(pady=10, padx=20, fill="x")
+        # Node IP
+        self.frame_node = ctk.CTkFrame(self)
+        self.frame_node.pack(pady=10, padx=20, fill="x")
         
-        self.lbl_samba = ctk.CTkLabel(self.frame_samba, text="Percorso Cartella Condivisa (Samba):")
-        self.lbl_samba.pack(anchor="w", padx=10, pady=(10, 0))
-        self.entry_samba = ctk.CTkEntry(self.frame_samba, width=300)
-        self.entry_samba.insert(0, self.settings["samba_path"])
-        self.entry_samba.pack(padx=10, pady=5)
+        self.lbl_node_ip = ctk.CTkLabel(self.frame_node, text="IP di questo Nodo (vuoto = auto-detect):")
+        self.lbl_node_ip.pack(anchor="w", padx=10, pady=(10, 0))
+        self.entry_node_ip = ctk.CTkEntry(self.frame_node, width=300, placeholder_text="Auto-detect dalla scheda di rete")
+        self.entry_node_ip.insert(0, self.settings.get("node_ip", ""))
+        self.entry_node_ip.pack(padx=10, pady=5)
         
         # Autostart
         self.frame_options = ctk.CTkFrame(self)
@@ -87,7 +87,7 @@ class SettingsWindow(ctk.CTk):
         except ValueError:
             pass # ignore invalid port for now
             
-        self.settings["samba_path"] = self.entry_samba.get()
+        self.settings["node_ip"] = self.entry_node_ip.get().strip()
         self.settings["autostart"] = self.var_autostart.get() == "on"
         
         save_settings(self.settings)

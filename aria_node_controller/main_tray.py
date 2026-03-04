@@ -2,6 +2,7 @@ import sys
 import os
 import threading
 import time
+import subprocess
 import pystray
 from PIL import Image, ImageDraw
 from pystray import MenuItem as item
@@ -15,6 +16,8 @@ from core.logger import setup_logging
 SEMAPHORE_GREEN = True
 redis_client = None
 orchestrator = None
+fish_tts_proc = None
+fish_vqgan_proc = None
 
 def init_redis():
     global redis_client
@@ -109,16 +112,58 @@ def menu_action_settings(icon, item):
     threading.Thread(target=_open_settings_thread, args=(icon,), daemon=True).start()
 
 def menu_action_exit(icon, item):
-    global orchestrator
+    global orchestrator, fish_tts_proc, fish_vqgan_proc
     if orchestrator:
         orchestrator.stop()
+    
+    print("Arresto dei server in background...")
+    if fish_tts_proc:
+        try:
+            fish_tts_proc.terminate()
+        except Exception:
+            pass
+    if fish_vqgan_proc:
+        try:
+            fish_vqgan_proc.terminate()
+        except Exception:
+            pass
+            
     icon.stop()
 
 def setup(icon):
-    global orchestrator
+    global orchestrator, fish_tts_proc, fish_vqgan_proc
     icon.visible = True
     # Init redis at startup
     init_redis()
+    
+    # Avvio dei Backend Locali (Fish Speech) in modalità "Silent", a meno che non sia specificato --no-backends
+    if "--no-backends" not in sys.argv:
+        print("Avvio dei server AI Backend in background...")
+        CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+        
+        # Fish TTS (8080)
+        try:
+            fish_tts_proc = subprocess.Popen(
+                [r"C:\Users\Roberto\aria\envs\fish-speech-env\python.exe", "tools\\api_server.py", "--listen", "0.0.0.0:8080", "--compile", "--llama-checkpoint-path", r"C:\Users\Roberto\aria\data\models\fish-s1-mini", "--decoder-checkpoint-path", r"C:\Users\Roberto\aria\data\models\fish-s1-mini\codec.pth", "--decoder-config-name", "modded_dac_vq"],
+                cwd=r"C:\Users\Roberto\aria\envs\fish-speech",
+                creationflags=CREATE_NO_WINDOW
+            )
+            print(" -> Avviato Fish TTS Server (Porta 8080)")
+        except Exception as e:
+            print(f"Errore lancio TTS Server: {e}")
+
+        # Fish Voice Cloning VQGAN (8081)
+        try:
+            fish_vqgan_proc = subprocess.Popen(
+                [r"C:\Users\Roberto\aria\envs\fish-speech-env\python.exe", "voice_cloning_server.py"],
+                cwd=r"C:\Users\Roberto\aria\envs\fish-speech",
+                creationflags=CREATE_NO_WINDOW
+            )
+            print(" -> Avviato Fish Voice Cloning Server (Porta 8081)")
+        except Exception as e:
+            print(f"Errore lancio Voice Cloning Server: {e}")
+    else:
+        print("Flag --no-backends rilevato. I server AI (8080/8081) devono essere avviati esternamente.")
     
     # Avvia l'orchestratore in background
     if redis_client:

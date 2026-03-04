@@ -1,0 +1,110 @@
+IDENTITY:
+  name: ARIA
+  description: >
+    Adaptive Resource for Inference and AI — Piattaforma di inferenza AI privata
+    e distribuita per reti domestiche. Trasforma un PC con GPU in un servizio
+    di inferenza condiviso ("stampante di rete intelligente per AI").
+  repo: locale (sviluppi/ARIA/)
+  stack: Python 3.10+, Redis, pystray, customtkinter, Fish-Speech, PyTorch/CUDA
+  blueprint: docs/ARIA-blueprint.md
+
+ARCHITECTURE:
+  overview: >
+    Architettura ibrida distribuita su Message Broker (Redis).
+    Il codice sorgente risiede su LXC 190 (ambiente di sviluppo).
+    Il runtime di produzione gira su Windows 11 (PC Gaming con GPU RTX 5060 Ti).
+    I file pesanti generati (WAV, MP4, JPEG) restano sul disco locale Windows
+    e vengono serviti via HTTP Asset Server (porta 8082) ai client sulla rete.
+  structure:
+    aria_node_controller/:   # Controller Windows — System Tray + Orchestratore Redis + Subprocess Manager
+      core/:                 # Logica di business (orchestrator.py, batch_optimizer.py, queue_manager.py, models.py, logger.py, config_manager.py)
+      main_tray.py:          # Entrypoint — pystray icon, subprocess.Popen per i backend AI
+      settings_gui.py:       # GUI customtkinter per configurazione Redis e autostart
+    aria_server/:            # (Futuro) ARIA Server completo con VRAMManager e routing multi-modello
+      backends/:             # Implementazioni backend per tipo modello (fish_tts.py, proxy.py)
+      api/:                  # FastAPI endpoints (http_api.py)
+    docs/:                   # Documentazione tecnica e blueprint
+    tests/:                  # Unit test
+
+INFRASTRUCTURE:
+  containers:
+    - vmid: 120
+      ip: 192.168.1.120
+      role: Redis Message Bus (DIAS Brain) — code di task e risultati
+    - vmid: 190
+      ip: 192.168.1.190
+      role: Ambiente di sviluppo NH-Mini — la codebase ARIA risiede qui
+  external:
+    - host: PC Gaming Windows 11
+      ip: 192.168.1.139
+      role: GPU Worker Node — esegue inferenza AI, serve asset via HTTP
+      gpu: NVIDIA RTX 5060 Ti 16GB VRAM
+      runtime_path: C:\Users\Roberto\aria\
+      ports: "8080 (Fish TTS), 8081 (Voice Cloning), 8082 (HTTP Asset Server)"
+  storage:
+    - type: locale Windows
+      path: C:\Users\Roberto\aria\data\
+      purpose: Modelli AI, voice samples, output generati (esposti HTTP)
+
+COMPONENTS:
+  - name: Node Controller (main_tray.py)
+    type: servizio nativo Windows
+    purpose: >
+      Orchestrazione GPU via System Tray. Avvia silenziosamente i backend AI
+      in subprocess, gestisce il semaforo GPU (gaming mode), consuma task Redis.
+  - name: Orchestrator (orchestrator.py)
+    type: modulo Python
+    purpose: >
+      Loop principale: polling Redis, routing task al backend Fish TTS,
+      salvataggio output locale, ritorno URL HTTP nel risultato Redis.
+  - name: HTTP Asset Server (integrato in orchestrator.py)
+    type: micro-server http.server
+    purpose: Espone la cartella outputs/ su porta 8082 in sola lettura.
+  - name: Fish TTS Backend
+    type: server API esterno (subprocess)
+    purpose: Sintesi vocale tramite modello fish-s1-mini su GPU.
+  - name: Fish Voice Cloning Backend
+    type: server API esterno (subprocess)
+    purpose: Encoding VQGAN per voice cloning da WAV reference.
+
+KNOWLEDGE_INDEX:
+  - docs/ARIA-blueprint.md                 # Architettura completa e specifiche
+  - docs/fish-tts-backend.md               # Dettagli backend Fish TTS
+  - docs/fish-tts-roadmap-checklist.md     # Checklist operativa Fish
+  - docs/aria-server-roadmap.md            # Roadmap ARIA Server (futuro)
+
+CREDENTIALS:
+  - redis.aria_password: password Redis per connessione a CT120 (gestita via settings_gui.py)
+  - note: "Le credenziali Redis sono salvate in node_settings.json locale su Windows. TODO: migrare a NH-Mini credential_manager SOPS+Age"
+
+ERROR_HANDLING:
+  patterns:
+    - errore: "WinError 3 / PermissionError su path di rete"
+      azione: "Eliminato — l'architettura non usa più path di rete. Tutti i file sono locali."
+    - errore: "Redis ConnectionError"
+      azione: "Verificare che CT120 sia running e Redis accessibile su porta 6379"
+    - errore: "subprocess.Popen fallisce per backend Fish"
+      azione: "Verificare che gli env Conda fish-speech e fish-voice-cloning esistano e siano attivabili"
+    - errore: "Porta 8080/8081/8082 già occupata"
+      azione: "Terminare processi Python orfani su Windows (taskkill /F /IM python.exe)"
+    - errore: "Accento inglese nel TTS italiano (Fish)"
+      azione: "Verificare che voice_ref_text corrisponda esattamente all'audio di riferimento (es. Ezechiele 25:17)"
+
+DEVELOPMENT_PHASE:
+  phase: testing
+  priorities:
+    - Raffinare l'integrazione dei tag emotivi Fish nel TextDirector di DIAS
+    - Testare il sistema di fallback automatico in caso di errore backend
+    - Implementare l'esposizione sicura dell'HTTP Asset Server (auth basica)
+  constraints:
+    - La codebase è sviluppata su LXC 190 (Linux) ma il runtime è Windows 11
+    - Il deploy su Windows avviene tramite git pull o scp manuale
+    - Gli ambienti Conda sono ancora nel Miniconda globale, non come --prefix isolato
+
+OVERRIDES:
+  - regola: "Container hostname pattern: ct{vmid}-{purpose}"
+    motivo: "Il nodo GPU è un PC Windows fisico, non un container LXC"
+    alternativa: "Documentato come 'external node' nella infrastructure-map"
+  - regola: "Mai esporre porte direttamente da app containers"
+    motivo: "Il nodo Windows espone 3 porte (8080, 8081, 8082) sulla LAN per i servizi AI"
+    alternativa: "Accettabile su rete locale fidata, come dichiarato nella security policy di ARIA"

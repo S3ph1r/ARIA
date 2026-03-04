@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 class AriaFileRef(BaseModel):
     ref_id: str
-    shared_path: str
+    local_path: str
     size_bytes: Optional[int] = None
 
 class AriaFileRefs(BaseModel):

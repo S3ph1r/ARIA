@@ -49,10 +49,18 @@ ha finito di giocare. Il client è progettato per gestire questa latenza variabi
 
 ### Principi fondamentali
 
-**1. Agnosticismo totale**
+**1. Agnosticismo e AI-as-a-Service (AIaaS)**
 ARIA Server non conosce DIAS, non conosce nessun progetto specifico.
-Riceve task con un tipo, un modello, un payload. Li esegue. Restituisce risultati.
-Qualsiasi client può usarlo per qualsiasi scopo.
+L'interazione avviene tramite **Intenti**: il client non dice ad ARIA *come* 
+lavorare (path, file specifici, prompt tecnici), ma *cosa* desidera ottenere.
+Qualsiasi client può usare ARIA per qualsiasi scopo tramite un'interfaccia 
+standardizzata e disaccoppiata.
+
+**2. Autonomia degli Asset**
+ARIA è il proprietario della propria "Libreria di Intenzioni". Gestisce 
+internamente le voci (Voice Library), i modelli (Model Registry) e i 
+template di prompt. Il client invia un ID astratto (es. `voice: "narratore"`), 
+e ARIA risolve autonomamente i file necessari (`ref.wav`, `ref.txt`).
 
 **2. Non-blocking sempre**
 `submit_task()` ritorna in <100ms in qualsiasi scenario — GPU occupata,
@@ -138,37 +146,37 @@ CLIENT                    REDIS (minipc)              ARIA SERVER (gaming PC)
 ### Componenti software
 
 ```
-ARIA SERVER (Windows — PC Gaming)
-├── aria_server/
-│   ├── main.py                  # Entry point e orchestratore
-│   ├── queue_manager.py         # BRPOP da Redis, routing ai worker
-│   ├── batch_optimizer.py       # Decide quale modello caricare
-│   ├── vram_manager.py          # Load/unload modelli, monitoring VRAM
-│   ├── semaphore.py             # Gestione stato green/red/busy
-│   ├── result_writer.py         # Scrive risultati su Redis
-│   ├── heartbeat.py             # Pubblica stato ogni 10s su Redis
-│   ├── backends/
-│   │   ├── base_backend.py      # Interfaccia astratta
-│   │   ├── tts_backend.py       # TTS (Orpheus, Kokoro, F5-TTS)
-│   │   ├── music_backend.py     # Music gen (MusicGen, AudioLDM)
-│   │   ├── llm_backend.py       # LLM testuali (Llama, Qwen, Mistral)
-│   │   ├── image_backend.py     # Image gen (SDXL, Flux)
-│   │   ├── vision_backend.py    # Multimodale (Qwen-VL, InternVL)
-│   │   └── stt_backend.py       # Speech-to-text (Whisper)
-│   └── api/
-│       └── http_api.py          # FastAPI: semaforo, status, health
+ARIA NODE CONTROLLER (Windows — Nodo GPU — %ARIA_ROOT%)
+├── aria_node_controller/              # Orchestratore e logica di controllo
+│   ├── main_tray.py                   # Entry point + Tray Icon (systray semaforo)
+│   ├── settings_gui.py                # GUI impostazioni (CustomTkinter)
+│   ├── qwen3_server.py                # Server FastAPI Qwen3-TTS (porta 8083)
+│   ├── core/
+│   │   ├── orchestrator.py            # Loop principale, dispatch task, process manager
+│   │   ├── queue_manager.py           # BRPOP da Redis, routing code
+│   │   ├── batch_optimizer.py         # Decide quale modello caricare
+│   │   ├── models.py                  # Pydantic models (AriaTaskResult, ecc.)
+│   │   ├── config_manager.py          # Lettura node_settings.json
+│   │   └── logger.py                  # Structured logging
+│   └── backends/
+│       └── qwen3_tts.py               # Backend HTTP per Qwen3-TTS
+├── envs/                              # Ambienti Python isolati (project-local)
+│   ├── qwen3tts/                      # Python 3.12 + PyTorch + qwen-tts
+│   └── fish-speech/                   # Repo Fish + (futuro) env Python 3.10
+├── data/
+│   ├── models/                        # Pesi dei modelli (fish-s1-mini, qwen3-tts-1.7b)
+│   ├── voices/                        # Voice Library (ref.wav + ref_padded.wav + ref.txt)
+│   └── outputs/                       # WAV generati (serviti via HTTP :8082)
+├── Avvia_Tutti_Server_ARIA.bat        # Script avvio principale
+└── node_settings.json                 # Configurazione nodo (Redis host, IP, ecc.)
 
-ARIA CLIENT (Python library — installabile su qualsiasi device)
-├── aria_client/
-│   ├── client.py                # ARIAClient: submit, get_result, wait
-│   ├── watcher.py               # Background thread: polling risultati
-│   ├── task_builder.py          # Builder per payload per tipo modello
-│   ├── dead_letter.py           # Gestione task scaduti/falliti
-│   └── mock_client.py           # Mock per sviluppo offline
+MINICONDA GLOBALE (%MINICONDA_ROOT%)
+└── python.exe                         # Python "base" per l'Orchestratore (pystray, redis, PIL)
 
 INFRASTRUTTURA CONDIVISA
-├── Redis (minipc, sempre attivo)    # Message bus centrale
-└── Samba/NFS share (minipc)         # File binari: audio, immagini, video
+├── Redis (%REDIS_HOST%, sempre attivo)           # Message bus centrale
+├── HTTP Asset Server (porta 8082)                 # Integrato nell'Orchestratore
+└── SSH da dev server → Nodo GPU                   # CI/CD domestico
 ```
 
 ---
@@ -193,10 +201,14 @@ loop:
   3. Se modello diverso da quello in VRAM: unload → load nuovo
   4. Consuma task dalla coda del modello scelto (BRPOP)
   5. Sposta task in gpu:processing:{job_id} (visibility timeout)
-  6. Esegui inferenza con backend appropriato
-  7. Scrivi risultato in gpu:result:{client_id}:{job_id}
-  8. Elimina gpu:processing:{job_id}
-  9. Torna a 2
+  6. **Risoluzione Intent (Aria-side)**:
+     - L'Orchestratore analizza il payload.
+     - Se presente `voice_id`, `intent_id` o `theme_id`, consulta il registro locale.
+     - Inietta i path fisici (`ref.wav`, `ref.txt`, `system_prompt`) nel payload.
+  7. Esegui inferenza con backend appropriato
+  8. Scrivi risultato in gpu:result:{client_id}:{job_id}
+  9. Elimina gpu:processing:{job_id}
+  10. Torna a 2
 ```
 
 ### 3.2 ARIA Client
@@ -313,6 +325,7 @@ class BaseBackend(ABC):
 
 | model_type | model_id (esempi) | VRAM est. | Framework | Output |
 |---|---|---|---|---|
+| `tts` | `fish-s1-mini` | 4GB | fish-speech (nativo) | WAV mono 44.1kHz |
 | `tts` | `orpheus-3b` | 7GB | transformers | WAV mono 48kHz |
 | `tts` | `kokoro-v1` | 2GB | transformers | WAV mono 24kHz |
 | `tts` | `f5-tts` | 4GB | transformers | WAV mono 24kHz |
@@ -336,6 +349,66 @@ Se VRAM insufficiente: unload del modello corrente prima di caricare il nuovo.
 L'unica eccezione: modelli molto piccoli (Kokoro 2GB + Whisper 3GB = 5GB)
 potrebbero coesistere. Questa ottimizzazione è futura — il comportamento
 di default è sempre "un modello alla volta".
+
+> ⚠️ **Limiti Hardware Voice Cloning (Fish S1-mini + VQGAN) su RTX 5000 (`sm_120`)**
+> Su macchine Windows dotate di GPU architettura `sm_120` (es. RTX 5060 Ti), le librerie PyTorch precompilate (versioni standard <2.7 pip/conda) crasheranno sul modulo VQGAN fallendo il lookup del kernel CUDA, rendendo obbligatorio il fallback in CPU.
+> **La soluzione approvata per mantenere l'accelerazione CUDA** consiste nell'installare esplicitamente PyTorch stabile 2.7+ e i pacchetti collegati puntando all'indice PyTorch CUDA 12.8 (`--index-url https://download.pytorch.org/whl/cu128`). Questa soluzione è stata verificata su entrambi gli ambienti Fish (`fish-speech` e `fish-voice-cloning`) ed è il riferimento per tutti i nuovi backend.
+
+---
+
+## 4b. Backend Inventory — Stato Reale di Deploy
+
+Questa sezione documenta lo **stato operativo effettivo** dei backend sul PC Gaming.
+Per i dettagli tecnici di ogni backend, consultare il documento dedicato.
+Per la guida completa agli ambienti Python, vedere `docs/environments-setup.md`.
+
+### Architettura Ambienti (PC Gaming — Marzo 2026)
+
+**Filosofia**: Miniconda globale (`%MINICONDA_ROOT%`) come gestore +
+ambienti Python isolati project-local (`%ARIA_ROOT%\envs\`).
+Per la tabella variabili e i valori concreti, vedere `docs/environments-setup.md`.
+
+```
+C:\Users\%USERNAME%\
+├── miniconda3\                    ← Python "base" per l'Orchestratore
+│   └── python.exe                 (pystray, redis, PIL — niente AI)
+└── aria\envs\
+    ├── qwen3tts\                  ← Python 3.12 + PyTorch + qwen-tts
+    │   └── python.exe
+    └── fish-speech-env\           ← Python 3.10 + PyTorch + fish-speech (da ricreare)
+        └── python.exe
+```
+
+| Ambiente | Path | Python | Backend | Porta | Stato | VRAM |
+|---|---|---|---|---|---|---|
+| Orchestratore | `miniconda3\` | 3.12 | main_tray.py | — | 🔄 Da installare | — |
+| Qwen3-TTS | `aria\envs\qwen3tts\` | 3.12 | qwen3_server.py | 8083 | ✅ Operativo | ~4-5 GB |
+| Fish S1-mini | `aria\envs\fish-speech-env\` | 3.10 | tools/api_server.py | 8080 | 🔄 Da ricreare | ~3-4 GB |
+| Voice Cloning | `aria\envs\fish-speech-env\` | 3.10 | voice_cloning_server.py | 8081 | 🔄 Da ricreare | CPU |
+| LLM (futuro) | `aria\envs\llm\` | 3.11 | llm_server.py | 8085 | 🔲 In sviluppo | ~5 GB |
+
+### Tabella Backend per Tipo
+
+| model_type | model_id | Backend Class | Ambiente | Documento | Stato |
+|---|---|---|---|---|---|
+| `tts` | `qwen3-tts-1.7b` | `Qwen3TTSBackend` | `envs/qwen3tts` | `docs/qwen3-tts-backend.md` | ✅ |
+| `tts` | `fish-s1-mini` | `FishTTSBackend` | `envs/fish-speech-env` | `docs/fish-tts-backend.md` | 🔄 |
+| `tts` | `voice-cloning` | (companion Fish) | `envs/fish-speech-env` | `docs/fish-tts-backend.md` | 🔄 |
+| `llm` | `llama-3.1-8b` | `LLMBackend` | `envs/llm` | `docs/llm-backend.md` | 🔲 |
+| `music` | `musicgen-small` | — | da creare | — | 🔲 Futuro |
+| `stt` | `whisper-large-v3` | — | da creare | — | 🔲 Futuro |
+
+### Pattern comune a tutti i backend
+
+Tutti i backend seguono il pattern **External HTTP Backend** con **avvio on-demand**:
+- Processo Python standalone nel suo ambiente project-local
+- Avviato dall'Orchestratore (`ModelProcessManager`) quando arriva un task
+- Espone un'API HTTP su una porta dedicata
+- Spento automaticamente dopo 45 min di inattività (`IDLE_TIMEOUT_S`)
+- Apre una finestra CMD visibile con log in tempo reale
+
+L'eccezione sono i backend futuri basati su `diffusers` (image) che potrebbero
+essere integrati direttamente nel Node Controller se l'ambiente conda lo permette.
 
 ---
 
@@ -363,14 +436,15 @@ di default è sempre "un modello alla volta".
     "input": [
       {
         "ref_id": "voice_sample",
-        "shared_path": "/mnt/aria-shared/voices/narrator.wav",
+        "local_path": "%ARIA_ROOT%\\data\\voices\\narrator.wav",
         "size_bytes": 441000
       }
     ],
     "output": [
       {
         "ref_id": "audio_output",
-        "shared_path": "/mnt/aria-shared/output/book_123/scene_001.wav"
+        "expected_filename": "{job_id}.wav",
+        "server_delivery": "http"
       }
     ]
   },
@@ -392,18 +466,20 @@ Il BatchOptimizer considera la priorità all'interno della stessa coda modello.
 ### Payload per tipo modello
 
 **TTS (model_type: tts)**:
+L'interfaccia preferita è quella **basata su intenti** (Voice ID). ARIA 
+risolve i parametri dalla sua libreria interna.
+
 ```json
 {
-  "text": "leah: Aprì la porta. <gasp> Non c'era nessuno.",
-  "voice_name": "leah",
-  "voice_sample_ref": "voice_sample",
-  "pace_factor": 0.82,
-  "output_ref": "audio_output",
-  "output_format": "wav",
-  "sample_rate": 48000,
-  "channels": 1
+  "text": "(serious) Il cammino dell'uomo timorato...",
+  "voice_id": "narratore",       // Intent: ARIA risolve wav e txt locali
+  "pace_factor": 1.0,
+  "output_format": "wav"
 }
 ```
+
+*Nota: La versione legacy con `file_refs` e `voice_sample_ref` resta supportata 
+solo per campioni temporanei "one-shot" non presenti in libreria.*
 
 **Music Generation (model_type: music)**:
 ```json
@@ -419,53 +495,34 @@ Il BatchOptimizer considera la priorità all'interno della stessa coda modello.
 ```
 
 **LLM Testuale (model_type: llm)**:
+ARIA può risolvere il modello e il sistema di prompt tramite un ID intento.
+
 ```json
 {
+  "intent": "scene_director",    // Resolves to specific model and system prompt
   "messages": [
-    {"role": "system", "content": "Sei un analista narrativo..."},
-    {"role": "user", "content": "Analizza questo testo: ..."}
+    {"role": "user", "content": "Testo del capitolo da analizzare..."}
   ],
   "max_tokens": 1000,
-  "temperature": 0.2,
-  "response_format": "json"
+  "temperature": 0.2
 }
 ```
 
 **Image Generation (model_type: image)**:
 ```json
 {
-  "prompt": "A dark monastery library, candlelight, dramatic shadows",
-  "negative_prompt": "blurry, low quality",
+  "theme": "monastic_dark",      // ARIA resolves style, negative prompt, etc.
+  "prompt": "A dark monastery library, candlelight",
   "width": 1024,
-  "height": 1024,
-  "steps": 30,
-  "guidance_scale": 7.5,
-  "output_ref": "image_output",
-  "output_format": "png"
-}
-```
-
-**Vision / Multimodale (model_type: vision)**:
-```json
-{
-  "messages": [
-    {"role": "user", "content": [
-      {"type": "image", "image_ref": "input_image"},
-      {"type": "text", "text": "Descrivi questa immagine in italiano."}
-    ]}
-  ],
-  "max_tokens": 500
+  "height": 1024
 }
 ```
 
 **Speech-to-Text (model_type: stt)**:
 ```json
 {
-  "audio_ref": "audio_input",
-  "language": "it",
-  "task": "transcribe",
-  "word_timestamps": true,
-  "output_format": "json"
+  "audio_url": "http://...",     // O ID asset registrato
+  "language": "it"
 }
 ```
 
@@ -743,69 +800,55 @@ t=5s   torch.cuda.OutOfMemoryError
 
 ---
 
-## 9. Gestione File Binari
+## 9. Gestione File Binari (Nuova Architettura HTTP Content Server)
 
-### Il problema
+### Il problema originale
 
 Redis è ottimizzato per dati piccoli (chiavi, metadati, JSON).
-Un WAV audio di 3 minuti pesa ~30MB. Un'immagine 1024x1024 pesa ~3MB.
-Mettere questi file su Redis saturrebbe la memoria e degraderebbe le performance.
+Inizialmente, ARIA utilizzava una condivisione Samba Linux montata su Windows, ma questo approccio generava gravi problemi di permessi (UNC paths, `WinError 3`, `PermissionError`) e un inutile collo di bottiglia di I/O. 
 
-### La soluzione: cartella condivisa LAN
+**Soluzione Architetturale: L'HTTP Asset Server Isolato**
+L'architettura aggiornata implementa un sistema self-contained ("On-Demand"):
+1. **Conservazione Locale:** Il nodo GPU (`aria_node_controller.py`) salva i risultati pesanti generati sul proprio SSD NVMe locale ad altissima velocità, all'interno della sua cartella di competenza isolata (`%ARIA_ROOT%\data\outputs`).
+2. **Accessibilità in Rete:** Il Controller avvia un micro-server HTTP nativo sulla porta 8082, garantendo l'accesso via link simbolico/URL all'interno della rete locale.
+3. **Payload a URL:** Invece di far combattere il Client LXC con path condivisi remoti Unix-To-Windows, Redis riceverà in output il direct link: `{"output_url": "http://192.168.1.139:8082/...wav"}` che il Client potrà scaricare o trasmettere nativamente.
 
-Una cartella condivisa tramite Samba (o NFS su Linux) è il canale per i file
-binari. Redis trasporta solo i **path** ai file, non i file stessi.
+Per i file immessi dall'utente per task specifici (come referenze audio per Voice Cloning), i path andranno definiti direttamente come `local_path` residenti nella radice del progetto host per la GPU (`%ARIA_ROOT%\data\voices`).
+
+1.  **Storage Locale su Windows**: Quando l'Orchestratore ARIA su Windows completa un'inferenza, salva l'asset finale direttamente nel suo file system locale (es. `%ARIA_ROOT%\outputs\`). Non ci sono più Virtual Drives, permessi incrociati o condivisioni di cartelle.
+2.  **HTTP Static Server**: Lo stesso Orchestratore Windows solleva un leggerissimo server HTTP locale (es. sulla porta `8082`) dedicato esclusivamente a servire in *sola lettura* la cartella `outputs`.
 
 ```
-MINIPC: condivide /mnt/aria-shared/ via Samba come \\minipc\aria-shared
-GAMING PC: mappa \\minipc\aria-shared come Z:\
+GAMING PC (Windows 11): 
+├── Esegue inferenza GPU
+├── Salva fisicamente su %ARIA_ROOT%\outputs\test-book-123.wav
+└── Serve all'IP http://192.168.1.139:8082/outputs/test-book-123.wav
 
-Struttura:
-/mnt/aria-shared/
-├── voices/                    # Campioni voce per TTS (input)
-│   └── narrator_it.wav
-├── input/                     # Input generici (immagini, audio, documenti)
-│   └── {client_id}/
-├── output/                    # Output dei task (audio, immagini)
-│   └── {client_id}/
-│       └── {book_id}/
-│           ├── voice/
-│           ├── music/
-│           └── images/
-└── models/                    # Modelli scaricati (opzionale, se su NAS)
+MINIPC (LXC 120 / DIAS):
+└── Consuma la URL via Redis e la passa al layer applicativo / browser client.
 ```
 
-### Path nei task
+### Path nei task e Payload di Ritorno
 
-Il payload usa `file_refs` con path nel formato del minipc (Linux).
-Il Server converte automaticamente i path usando la mappatura configurata:
-
-```yaml
-# config.yaml ARIA Server
-file_sharing:
-  minipc_base_path: "/mnt/aria-shared"      # come lo vede il minipc
-  server_base_path: "Z:\\"                   # come lo vede il gaming PC
-```
-
-Il Server sostituisce `minipc_base_path` con `server_base_path` prima
-di accedere ai file. Il client non deve preoccuparsi di questa conversione.
-
-### Fallback per ambienti senza condivisione file
-
-Per client che non hanno accesso alla condivisione (device remoti, test),
-ARIA supporta trasferimento file inline via Redis con limite 5MB:
+L'orchestratore non risponde più passando un `path` Unix o Windows nei risultati Redis, ma una URL universale assoluta. Questo slega completamente i client (DIAS, WebApp, app mobile) dalla conoscenza della topologia del file system.
 
 ```json
 {
-  "payload": {
-    "voice_sample_inline": "base64encodeddata...",
-    "voice_sample_format": "wav"
+  "job_id": "test-book-123",
+  "client_id": "dias-minipc",
+  "status": "done",
+  "output": {
+    "audio_url": "http://192.168.1.139:8082/outputs/test-book-123.wav",
+    "duration_seconds": 142.5
   }
 }
 ```
 
-Oltre 5MB il task viene rifiutato con `error_code: FILE_TOO_LARGE_FOR_INLINE`.
-In questo caso il client deve configurare la condivisione file.
+### Gestione degli Input (File References)
+
+Per i file necessari in ingresso all'inferenza (ad esempio i campioni voce per il Voice Cloning), l'architettura supporta due approcci:
+1.  **Trasferimento Inline Base64**: Per file piccoli (come reference audio di 10 secondi), il payload inietta direttamente i token convertiti in base64 string.
+2.  **URL HTTP Retrieval**: Per file più grandi, DIAS fornirà una URL esposta dal proprio content-server e l'Orchestratore Windows si occuperà di scaricarla localmente prima dell'inferenza. Niente più passaggi di `shared_path`.
 
 ---
 
@@ -947,32 +990,32 @@ semaphore:
   red_vram_unload_after_minutes: 30
 
 file_sharing:
-  minipc_base_path: "/mnt/aria-shared"
-  server_base_path: "Z:\\"
+  server_base_path: "%ARIA_ROOT%\\data\\outputs"
+  http_asset_server_port: 8082
   inline_max_bytes: 5242880      # 5MB
 
 models:
   tts:
-    orpheus-3b:
+    fish-s1-mini:
       enabled: true
-      model_path: "C:/models/orpheus-3b-q4"
-      estimated_vram_gb: 7.0
+      model_path: "aria/data/models/fish-s1-mini"
+      estimated_vram_gb: 4.0
       max_retries: 2
-    kokoro-v1:
+    orpheus-3b:
       enabled: false
-      model_path: "C:/models/kokoro-v1"
-      estimated_vram_gb: 2.0
+      model_path: "aria/data/models/orpheus-3b-q4"
+      estimated_vram_gb: 7.0
       max_retries: 2
   music:
     musicgen-small:
-      enabled: true
-      model_path: "C:/models/musicgen-small"
+      enabled: false
+      model_path: "aria/data/models/musicgen-small"
       estimated_vram_gb: 4.0
       max_retries: 1
   llm:
     llama-3.1-8b:
       enabled: false
-      model_path: "C:/models/llama-3.1-8b-q4"
+      model_path: "aria/data/models/llama-3.1-8b-q4"
       estimated_vram_gb: 5.5
       max_retries: 1
 
@@ -1077,5 +1120,53 @@ HTTPS sull'API, autenticazione client_id con token.
 
 ---
 
-*ARIA Blueprint v1.0 — Febbraio 2026*
-*Documento funzionale — precede roadmap sviluppo Server e Client*
+## 15. Evoluzione AI-as-a-Service (SOA)
+
+### Visione: Disaccoppiamento Client-Portante
+Nella versione v2.0, ARIA si evolve da semplice "worker di PDF/WAV" a un vero provider di servizi AI. 
+
+1. **Agnosticismo del Client**: Un'app (come DIAS) non deve sapere che ARIA sta usando Fish S1-mini o Llama-3. Deve solo richiedere una "Azione" (es: `generate_speech`) con dei parametri semantici (`voice: "narratore"`).
+2. **Internalizzazione degli Asset**: ARIA gestisce un proprio file system strutturato per gli asset:
+   - `/aria/data/voices/{voice_id}/ref.wav`
+   - `/aria/data/voices/{voice_id}/ref.txt`
+   - `/aria/data/prompts/{task_type}/system_prompt.txt`
+
+### Flusso di Risoluzione Interna (ARIA-side)
+Quando ARIA riceve un task con intent `voice_id: "narratore"`:
+1. **Lookup**: L'Orchestratore consulta la `VoiceLibrary`.
+2. **Risoluzione**: Se l'ID esiste, ARIA inietta automaticamente i path locali (`%ARIA_ROOT%\...`) nel payload che invia al backend specifico.
+3. **Execution**: Il backend riceve i file già pronti senza che il client remoto (DIAS su Linux) abbia mai saputo della loro esistenza.
+
+### Futuro: Pipeline Interamente Locali
+In questa visione, DIAS potrebbe delegare ad ARIA non solo la voce, ma anche la generazione del copione:
+- **Task 1 (LLM)**: Client → ARIA (LLM Backend) → JSON Scena.
+- **Task 2 (TTS)**: Client → ARIA (TTS Backend) → WAV Scena.
+Questo riduce la latenza, azzera la dipendenza da API esterne (Google) e centralizza la "conoscenza" AI in un unico nodo GPU potente.
+
+---
+
+*ARIA Blueprint v2.0 — Marzo 2026*
+*Documento di evoluzione architetturale verso AI-as-a-Service*
+## 15. Deployment & Bootstrap (NH-Mini Philosophy)
+
+Come risposto alla domanda: "Basta Git per accendere un nuovo PC?", la risposta è **Sì per la logica, No per gli asset**.
+
+### 15.1 Logica (Git / LXC 190)
+Il repository Git contiene tutto ciò che definisce il "cervello" e i "muscoli" di ARIA:
+- Il codice dei backend (`aria_server/backends/`).
+- L'orchestratore del nodo (`aria_node_controller/`).
+- Gli script di avvio (`Avvia_Tutti_Server_ARIA.bat`).
+- La documentazione e i blueprint.
+
+### 15.2 Assets (Local / Runtime)
+Gli asset pesanti e specifici del nodo **non sono in Git** per design. Devono essere replicati o scaricati sul nuovo PC:
+1. **Modelle AI (`data/models/`)**: Giga di pesi (GGUF, Safetensors) scaricabili via `aria-download.bat`.
+2. **Voice Library (`data/voices/`)**: La libreria delle voci clonate. È un database locale. Si consiglia di sincronizzarla separatamente se si vuole consistenza tra nodi.
+3. **Ambienti Python (`envs/` o Conda)**: Vanno ricreati seguendo `SETUP_PC_GAMING.md` per garantire la compatibilità con l'hardware specifico (driver CUDA, architettura sm_xxx).
+
+### 15.3 Piano di "Cold Boot" (Nuovo Nodo)
+1. `git clone` del repo.
+2. Installazione Conda + PyTorch sm_120 (vedi `SETUP_PC_GAMING.md`).
+3. Esecuzione `aria-download.bat` per scaricare `fish-s1-mini`.
+4. Copia manuale (o via rete) della cartella `data/voices` se si desidera ereditare le voci esistenti.
+5. Avvio via `Avvia_Tutti_Server_ARIA.bat`.
