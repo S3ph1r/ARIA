@@ -19,10 +19,14 @@ from .models import AriaTaskResult
 
 # Backends
 try:
-    from ..backends.qwen3_tts import Qwen3TTSBackend
+    from backends.qwen3_tts import Qwen3TTSBackend
     _QWEN3_AVAILABLE = True
 except ImportError:
-    _QWEN3_AVAILABLE = False
+    try:
+        from ..backends.qwen3_tts import Qwen3TTSBackend
+        _QWEN3_AVAILABLE = True
+    except ImportError:
+        _QWEN3_AVAILABLE = False
 
 
 logger = get_logger("node.orchestrator")
@@ -138,16 +142,21 @@ class ModelProcessManager:
         """Avvia un singolo processo e attende il health check."""
 
         with self._lock:
-            proc = self._procs.get(model_id)
-
-            # Già in esecuzione?
-            if proc and proc.poll() is None and self._health_check(model_id):
-                self._idle_since.pop(model_id, None)  # reset idle
+            # 1. Controllo proattivo: Il backend è già attivo e responsive (anche se esterno)?
+            if self._health_check(model_id):
+                logger.info(f"{model_id}: backend già attivo e responsivo (rilevato esternamente).")
+                self._idle_since.pop(model_id, None)
                 return True
+
+            proc = self._procs.get(model_id)
 
             # Il processo era morto o non esisteva
             if proc and proc.poll() is not None:
                 logger.warning(f"{model_id}: processo terminato inaspettatamente, riavvio...")
+            elif proc and proc.poll() is None:
+                # Se arriviamo qui, il processo esiste ma NON è responsive (altrimenti saremmo usciti sopra)
+                logger.warning(f"{model_id}: processo attivo ma non risponde. Lo termino per riavvio pulito...")
+                self._kill_proc(model_id)
 
             # Avvio
             try:

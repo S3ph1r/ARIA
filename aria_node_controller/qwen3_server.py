@@ -30,7 +30,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from transformers import AutoModel
+from qwen_tts import Qwen3TTSModel
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configurazione
@@ -74,16 +74,15 @@ def load_model():
     )
 
     try:
-        model = AutoModel.from_pretrained(
+        model = Qwen3TTSModel.from_pretrained(
             MODEL_PATH, attn_implementation="flash_attention_2", **common_kwargs
         )
         attn_mode = "flash_attention_2"
     except Exception as e:
         logger.warning(f"Flash attention non disponibile ({type(e).__name__}), caricamento standard.")
-        model = AutoModel.from_pretrained(MODEL_PATH, **common_kwargs)
+        model = Qwen3TTSModel.from_pretrained(MODEL_PATH, **common_kwargs)
         attn_mode = "standard"
 
-    model.eval()
     elapsed = time.time() - t0
     vram_gb = torch.cuda.memory_allocated() / 1e9 if DEVICE == "cuda" else 0
     logger.info(f"Modello caricato in {elapsed:.1f}s | VRAM: {vram_gb:.2f} GB | Attn: {attn_mode}")
@@ -202,14 +201,17 @@ def synthesize(req: TTSRequest):
         n_words = len(chunk_text_part.split())
         logger.info(f"  Chunk {i+1}/{len(chunks)}: {n_words} parole")
         try:
-            wavs, sr = model.generate_base_voice(
+            is_x_vector_only = (req.voice_ref_text is None)
+            ref_input = (ref_audio, ref_sr)
+
+            wavs, sr = model.generate_voice_clone(
                 text=chunk_text_part,
-                ref_audio=ref_audio,
-                ref_sr=ref_sr,
-                ref_text=req.voice_ref_text,   # None è ok (Qwen3 lo gestisce)
+                ref_audio=ref_input,
+                ref_text=req.voice_ref_text,   # None è ok se x_vector_only_mode=True
                 language=req.language,
                 instruct=req.instruct,
                 non_streaming_mode=req.non_streaming_mode,
+                x_vector_only_mode=is_x_vector_only,
                 max_new_tokens=req.max_new_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
