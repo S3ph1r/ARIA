@@ -251,5 +251,20 @@ Usiamo `--prefix` per tenere tutto dentro `%ARIA_ROOT%\envs\` — portabilità e
 
 ---
 
+## 7. Riproducibilità (Template YAML)
+
+Per ricostruire rapidamente gli ambienti in caso di corruzione o migrazione, utilizzare i file template in `envs/templates/`:
+
+*   **Orchestratore**: `envs/templates/orchestrator.yml`
+*   **Qwen3-TTS**: `envs/templates/qwen3-tts.yml`
+*   **Fish-Speech**: `envs/templates/fish-speech.yml`
+
+Esempio di utilizzo:
+```cmd
+conda env create --prefix %ARIA_ROOT%\envs\nuovo_env --file envs\templates\qwen3-tts.yml
+```
+
+---
+
 *ARIA Environments Setup — Marzo 2026*
 *Documenti correlati: `docs/ARIA-blueprint.md` (sezione 4b), `docs/hybrid-tts-architecture.md`*
