@@ -290,6 +290,7 @@ def get_node_ip():
 class NodeOrchestrator:
     def __init__(self, redis_client):
         self.local_ip = get_node_ip()
+        self.aria_root = ARIA_ROOT
         logger.info(f"Node IP resolved to: {self.local_ip}")
         self.qm = AriaQueueManager(redis_client)
         self.optimizer = BatchOptimizer(redis_client)
