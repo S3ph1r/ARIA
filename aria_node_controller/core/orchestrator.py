@@ -171,10 +171,18 @@ class ModelProcessManager:
                     cmd_str = " ".join(f'"{c}"' for c in cmd)
                     title = f"ARIA Backend: {model_id}"
                     
+                    # Iniezione PATH per SoX e altre dipendenze core
+                    env = os.environ.copy()
+                    sox_path = str(self.aria_root / "envs" / "sox" / "Library" / "bin")
+                    if os.path.exists(sox_path):
+                        env["PATH"] = sox_path + os.pathsep + env.get("PATH", "")
+                        logger.info(f"Injected SoX path: {sox_path}")
+
                     new_proc = subprocess.Popen(
                         f'start "{title}" cmd.exe /k "{cmd_str}"',
                         shell=True,
-                        cwd=str(self.aria_root)
+                        cwd=str(self.aria_root),
+                        env=env
                     )
                 else:
                     # Fallback standard per Linux/Mac (Mantiene i log su file per non sporcare stdout)
@@ -352,14 +360,45 @@ class NodeOrchestrator:
         self.semaphore_green = state
         logger.info(f"Orchestrator semaphore set to {'GREEN' if state else 'RED'}")
 
+    def _discover_voices(self) -> list:
+        """Scansiona la cartella data/voices per trovare le voci disponibili."""
+        voices_dir = self.aria_root / "data" / "voices"
+        if not voices_dir.exists():
+            return []
+        
+        # Ogni sottocartella in data/voices/ è una voce
+        return [d.name for d in voices_dir.iterdir() if d.is_dir()]
+
+    def _send_heartbeat(self):
+        """Invia lo stato del nodo a Redis per monitoraggio globale."""
+        try:
+            from datetime import datetime, timezone
+            status = {
+                "node_ip": self.local_ip,
+                "status": "online" if self.semaphore_green else "paused",
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+                "active_backends": list(self.process_manager._procs.keys()),
+                "available_voices": self._discover_voices(),
+            }
+            key = f"aria:global:node:{self.local_ip}:status"
+            self.qm.redis.set(key, json.dumps(status), ex=60)
+        except Exception as e:
+            logger.error(f"Failed to send heartbeat: {e}")
+
     def _run_loop(self):
         current_model = None
         known_models = {
             "fish-s1-mini":    BatchOptimizer.build_queue_key("tts", "fish-s1-mini"),
             "qwen3-tts-1.7b": BatchOptimizer.build_queue_key("tts", "qwen3-tts-1.7b"),
         }
-
+        
+        last_heartbeat = 0
         while self.running:
+            # Heartbeat ogni 20 secondi
+            if time.time() - last_heartbeat > 20:
+                self._send_heartbeat()
+                last_heartbeat = time.time()
+
             if not self.semaphore_green:
                 time.sleep(2)
                 continue
@@ -423,8 +462,51 @@ class NodeOrchestrator:
             logger.error(f"Encoding failed: {e}")
             raise
 
+    def _get_wav_duration(self, file_path: Path) -> float:
+        import wave
+        try:
+            with wave.open(str(file_path), 'rb') as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+                return frames / float(rate)
+        except Exception as e:
+            logger.error(f"Errore calcolo durata WAV {file_path}: {e}")
+            return 0.0
+
     def _process_task(self, task):
         start_t = time.time()
+        
+        # --- Idempotency Check (SOA v2.1) ---
+        # Determiniamo il nome file atteso per questo task
+        if task.model_id == "fish-s1-mini":
+            filename = f"{task.job_id}_scene-001.wav"
+        else:
+            filename = f"{task.job_id}.wav"
+            
+        local_out_path = ARIA_OUTPUT_DIR / filename
+        
+        if local_out_path.exists():
+            logger.info(f"Idempotenza ARIA: File {filename} già presente. Salto inferenza.")
+            duration_s = self._get_wav_duration(local_out_path)
+            # Nota: Uniformiamo il porto del server asset (8082) per ogni tipo di output
+            public_url = f"http://{self.local_ip}:{HTTP_PORT}/{filename}"
+            
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=time.time() - start_t,
+                output={
+                    "audio_url": public_url, 
+                    "duration_seconds": duration_s,
+                    "cached": True
+                }
+            )
+            self.qm.post_result(task, result)
+            return
+
         if task.model_id == "qwen3-tts-1.7b":
             self._process_qwen3_task(task, start_t)
         elif task.model_id == "fish-s1-mini":

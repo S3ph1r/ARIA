@@ -99,45 +99,37 @@ Il codice è open source e ispezionabile.
 ║                     RETE LOCALE (LAN)                        ║
 ║                                                              ║
 ║  ┌─────────────────────┐      ┌──────────────────────────┐  ║
-║  │   MINIPC (24/7)     │      │   PC GAMING (on-demand)  │  ║
+║  │   BRAIN NODE        │      │   WORKER NODE (GPU)      │  ║
 ║  │                     │      │                          │  ║
-║  │  DIAS               │      │  ARIA SERVER             │  ║
-║  │  + ARIA Client      │◄────►│  (Python service)        │  ║
+║  │  Narrative Engine   │◄────►│  ARIA SERVER             │  ║
+║  │  (DIAS, etc.)       │      │  (Inference Service)     │  ║
 ║  │                     │      │                          │  ║
-║  │  Redis Server ◄─────┼──────┼─── legge/scrive code     │  ║
-║  │  (sempre attivo)    │      │                          │  ║
-║  └─────────────────────┘      │  RTX 5060 Ti 16GB        │  ║
+║  │  INFRASTRUCTURE ◄───┼──────┼─── legge/scrive code     │  ║
+║  │  (Redis Store)      │      │                          │  ║
+║  └─────────────────────┘      │  Hardware Accelerato     │  ║
 ║             │                 └──────────────────────────┘  ║
 ║             │                               ▲                ║
-║             └──────── SSH (Distrib/CI/CD) ──┘                ║
+║             └──────── SSH (Management) ──────┘                ║
 ║                                                              ║
-║  ┌──────────────────┐   ┌───────────────────────────────┐   ║
-║  │  LAPTOP / altro  │   │  FUTURO: altro device con GPU  │  ║
-║  │  + ARIA Client   │   │  + ARIA Server                 │  ║
-║  └──────────────────┘   └───────────────────────────────┘   ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
-**Workflow "NH-Mini Distribuito" (Sviluppo & Deploy)**:
-ARIA segue un pattern di sviluppo remoto (CI/CD domestico). Tutto il codice sorgente (Python, Dockerfiles, script) e l'Agent AI risiedono e operano all'interno di un **LXC dedicato (192.168.1.190)** sul Minipc. 
-L'LXC "comanda" il PC Gaming (192.168.1.139) esclusivamente e permanentemente via **SSH**, incaricandolo di eseguire rebuild Docker, lanciare container o leggere i log della GPU, senza che lo sviluppatore debba fisicamente interagire con l'interfaccia di Windows. Questo garantisce che:
-*   Lo sviluppo resti in un ambiente linux isolato (il MiniPC).
-*   Il PC Gaming funzioni puramente come una "GPU as a Service" (o Worker Node) headless.
+**Filosofia Agnostica**: ARIA non è legata a un IP specifico. La scoperta dei nodi avviene tramite il registro degli heartbeat su Redis. Per le specifiche tecniche di comunicazione, consultare [ARIA-network-interface.md](ARIA-network-interface.md).
 
 ### Flusso dati ad alto livello
 
 ```
-CLIENT                    REDIS (minipc)              ARIA SERVER (gaming PC)
+CLIENT                    REDIS (Infrastructure)      ARIA WORKER (GPU Node)
   │                           │                               │
   │── submit_task() ─────────►│                               │
-  │   LPUSH gpu:queue:*       │                               │
+  │   (vedi Interface Spec)   │                               │
   │◄─ job_id ─────────────────│                               │
-  │                           │◄──── BRPOP gpu:queue:* ───────│
-  │                           │      (polling continuo)       │
+  │                           │◄──── fetch_task() ────────────│
+  │                           │                               │
   │                           │                               │── carica modello
   │                           │                               │── esegue inferenza
   │                           │                               │── salva output
-  │                           │◄──── SET gpu:result:{id} ─────│
+  │                           │◄──── post_result() ───────────│
   │                           │                               │
   │── get_result() ──────────►│                               │
   │◄─ result ─────────────────│                               │
@@ -164,20 +156,13 @@ ARIA NODE CONTROLLER (Windows — Nodo GPU — %ARIA_ROOT%)
 │   ├── qwen3tts/                      # Python 3.12 + PyTorch + qwen-tts
 │   └── fish-speech/                   # Repo Fish + (futuro) env Python 3.10
 ├── data/
-│   ├── models/                        # Pesi dei modelli (fish-s1-mini, qwen3-tts-1.7b)
-│   ├── voices/                        # Voice Library (ref.wav + ref_padded.wav + ref.txt)
+│   ├── models/                        # Pesi dei modelli
+│   ├── voices/                        # Voice Library
 │   └── outputs/                       # WAV generati (serviti via HTTP :8082)
 ├── Avvia_Tutti_Server_ARIA.bat        # Script avvio principale
-└── node_settings.json                 # Configurazione nodo (Redis host, IP, ecc.)
-
-MINICONDA GLOBALE (%MINICONDA_ROOT%)
-└── python.exe                         # Python "base" per l'Orchestratore (pystray, redis, PIL)
-
-INFRASTRUTTURA CONDIVISA
-├── Redis (%REDIS_HOST%, sempre attivo)           # Message bus centrale
-├── HTTP Asset Server (porta 8082)                 # Integrato nell'Orchestratore
-└── SSH da dev server → Nodo GPU                   # CI/CD domestico
+└── node_settings.json                 # Configurazione nodo (Network role: Worker)
 ```
+Per i dettagli sulla configurazione e l'accesso a Redis, consultare [ARIA-network-interface.md](ARIA-network-interface.md).
 
 ---
 

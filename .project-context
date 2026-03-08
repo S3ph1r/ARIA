@@ -28,23 +28,19 @@ ARCHITECTURE:
 
 INFRASTRUCTURE:
   containers:
-    - vmid: 120
-      ip: 192.168.1.120
-      role: Redis Message Bus (DIAS Brain) — code di task e risultati
-    - vmid: 190
-      ip: 192.168.1.190
-      role: Ambiente di sviluppo NH-Mini — la codebase ARIA risiede qui
-  external:
-    - host: PC Gaming Windows 11
-      ip: 192.168.1.139
-      role: GPU Worker Node — esegue inferenza AI, serve asset via HTTP
+INFRASTRUCTURE:
+  nodes:
+    - role: Infrastructure (Redis Message Bus)
+      purpose: State management and task queues
+    - role: Brain Node (Development & Logic)
+      purpose: Codebase residence and orchestration logic
+    - role: Worker Node (GPU Inference)
+      purpose: Executes AI inference, serves assets via HTTP
       gpu: NVIDIA RTX 5060 Ti 16GB VRAM
-      runtime_path: C:\Users\Roberto\aria\
-      ports: "8080 (Fish TTS), 8081 (Voice Cloning), 8082 (HTTP Asset Server)"
+      ports: "8080 (Fish), 8081 (Cloning), 8082 (HTTP Assets)"
   storage:
-    - type: locale Windows
-      path: C:\Users\Roberto\aria\data\
-      purpose: Modelli AI, voice samples, output generati (esposti HTTP)
+    - type: Worker Local Storage
+      purpose: Models, voices, and output assets
 
 COMPONENTS:
   - name: Node Controller (main_tray.py)
