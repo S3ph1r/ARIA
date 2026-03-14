@@ -12,12 +12,12 @@ class BatchOptimizer:
     """
     
     @staticmethod
-    def build_queue_key(model_type: str, model_id: str) -> str:
+    def build_queue_key(model_type: str, model_id: str, provider: str = "local", client_id: str = "*") -> str:
         """
         Creates the standardized canonical Redis queue key name for a given model.
-        Correct schema: gpu:queue:{model_type}:{model_id}
+        Correct schema: global:queue:{model_type}:{provider}:{model_id}:{client_id}
         """
-        return f"gpu:queue:{model_type}:{model_id}"
+        return f"global:queue:{model_type}:{provider}:{model_id}:{client_id}"
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client

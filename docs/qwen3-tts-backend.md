@@ -56,9 +56,9 @@ Per ARIA/DIAS usare **esclusivamente** `Qwen3-TTS-12Hz-1.7B-Base`:
 
 | Variante | Param | VRAM | Uso |
 |----------|-------|------|-----|
-| `12Hz-1.7B-Base` | 1.7B | ~4-5 GB | ✅ Voice cloning (per DIAS) |
+| `12Hz-1.7B-Base` | 1.7B | ~4-5 GB | ✅ Voice cloning + Instruct (Base) |
 | `12Hz-0.6B-Base` | 0.6B | ~4 GB | ❌ Bug long-silence |
-| `12Hz-1.7B-CustomVoice` | 1.7B | ~6 GB | ❌ Solo speaker predefiniti |
+| `12Hz-1.7B-CustomVoice` | 1.7B | ~6 GB | ✅ Alta espressività + Instruct (Full) |
 
 ---
 
@@ -141,10 +141,13 @@ ref_padded.wav → [audio + 0.5s silenzio]  → generato pulito ✅
 
 ## 6. Instruct: Controllo Stile via Linguaggio Naturale
 
-A differenza di Fish (emotion markers espliciti), Qwen3 usa **istruzioni**
-in linguaggio naturale per controllare tono, ritmo e atmosfera:
+A differenza di Fish (emotion markers espliciti), Qwen3 usa **istruzioni in prosa naturale inglese** (2-3 frasi) per controllare tono, ritmo e atmosfera. Il sistema non usa più etichette rigide (`Tone: Bright`), ma descrizioni narrative:
 
-### Mappa emozioni DIAS → instruct Qwen3
+### Esempio di Prose Instruct
+`"The narrator delivers the lines with a warm, comforting tone, slowly building anticipation. Use soft breathy articulation for the dialogue parts."`
+
+### Mappa di fallback (ARIA side)
+Se il client non invia `qwen3_instruct`, ARIA applica questi preset basati su `primary_emotion`:
 
 | primary_emotion (DIAS) | Instruct Qwen3 |
 |---|---|
@@ -185,34 +188,42 @@ Qwen3 è un **External HTTP Backend** avviato on-demand dall'Orchestratore:
 
 ```python
 # In orchestrator.py → _build_cmd()
-if model_id == "qwen3-tts-1.7b":
+if model_id in ["qwen3-tts-1.7b", "qwen3-tts-custom"]:
     python = str(self.aria_root / "envs" / "qwen3tts" / "python.exe")
     server = self.aria_root / "aria_node_controller" / "qwen3_server.py"
-    return [python, str(server)]
+    # Determina checkpoint e porta...
+    return [python, str(server), "--model-path", ..., "--port", "8083"]
 ```
+
+### JIT Model Swap (SOA v2.1)
+L'Orchestratore gestisce lo scambio dinamico dei modelli sulla stessa porta GPU:
+1. Se arriva un task per `qwen3-tts-custom` ma è attivo il `Base`, l'orchestratore termina il vecchio processo.
+2. Avvia il nuovo modello sulla porta 8083.
+3. Lo `startup_wait` è impostato a **240s** per garantire il caricamento VRAM.
 
 ### Schema Redis
-
 ```
-INPUT:   gpu:queue:tts:qwen3-tts-1.7b
+INPUT:   gpu:queue:tts:{model_id} (es. qwen3-tts-1.7b o qwen3-tts-custom)
 OUTPUT:  gpu:result:{client_id}:{job_id}
 ```
 
-### Payload esempio
+### Payload esempio (Naming Coherence)
 
 ```json
 {
-  "job_id": "uuid-v4",
-  "client_id": "dias-minipc",
+  "job_id": "Moby-Dick-chunk-001-scene-002",
+  "client_id": "dias-pipeline",
   "model_type": "tts",
   "model_id": "qwen3-tts-1.7b",
   "payload": {
-    "text": "Il sole sorgeva lentamente...",
-    "voice_id": "angelo",
-    "instruct": "Warm male voice, calm narrator."
+    "job_id": "Moby-Dick-chunk-001-scene-002",
+    "text": "Il mare era calmo quel mattino...",
+    "voice_id": "luca"
   }
 }
 ```
+
+> **Nota**: Il campo `job_id` all'interno del `payload` è obbligatorio per garantire che il file WAV venga salvato con il nome descrittivo richiesto dal client, abilitando la logica di **Remote Skip** su DIAS. Se omesso, il backend genererà un UUID casuale rendendo il file non rintracciabile deterministicamente.
 
 ---
 

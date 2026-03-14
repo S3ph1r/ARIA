@@ -1,19 +1,15 @@
 """
-ARIA — Backend Qwen3-TTS 1.7B (QW-2)
+ARIA — Backend Qwen3-TTS 1.7B
 ======================================
-Segue il pattern External HTTP Backend identico a fish_tts.py.
-Chiamato dall'orchestratore quando riceve task dalla coda gpu:queue:tts:qwen3-tts-1.7b.
-
-Il backend delega la sintesi al processo standalone qwen3_server.py (porta 8083)
-che gira nell'ambiente conda `qwen3-tts` (Python 3.12).
+Segue il pattern External HTTP Backend. 
+Supporta varianti multiple (Base, CustomVoice) tramite model_id.
 
 Flusso:
-  1. Orchestrator riceve task dalla coda Redis qwen3-tts-1.7b
-  2. Chiama Qwen3TTSBackend.run(payload)
-  3. Backend risolve voice_id → ref_padded.wav dalla Voice Library
+  1. Orchestrator riceve task dalla coda Redis gpu:queue:tts:qwen3-tts-*
+  2. Orchestrator garantisce lo swap JIT del modello corretto su porta 8083.
+  3. Chiama Qwen3TTSBackend.run(payload)
   4. POST verso http://127.0.0.1:8083/tts
-  5. WAV salvato in C:\\Users\\Roberto\\aria\\data\\outputs\\{job_id}.wav
-  6. URL http pubblica scritta nel callback Redis
+  5. Audio rintracciabile via {job_id}.wav per Remote Skip logic.
 """
 
 import uuid
@@ -109,16 +105,12 @@ class Qwen3TTSBackend:
                     "(potrebbe esserci bleeding fonetico — esegui create_padded_ref.py)"
                 )
             else:
-                raise ValueError(
-                    f"Nessun ref.wav trovato per voice_id='{voice_id}' in {voice_dir}"
-                )
-
-        if not voice_ref_path_str:
-            raise ValueError("Specificare 'voice_id' oppure 'voice_ref_audio_path' nel payload")
+                logger.info(f"Ricevuto voice_id='{voice_id}' ma nessun ref.wav trovato in {voice_dir}. Procedo (ok se CustomVoice).")
 
         # ── Parametri ────────────────────────────────────────────────────────
-        job_id          = payload.get("job_id", str(uuid.uuid4()))
+        job_id          = payload.get("job_id") or payload.get("unique_aria_job_id") or str(uuid.uuid4())
         output_filename = f"{job_id}.wav"
+        logger.info(f"Target output filename: {output_filename}")
 
         # L'instruct viene da Stage C (campo qwen3_instruct nella scena)
         # oppure dal payload diretto. Fallback alla mappa statica via emotion.
@@ -129,9 +121,16 @@ class Qwen3TTSBackend:
             if payload.get("scene_metadata", {}).get("pace_factor", 1.0) < 0.8:
                 instruct += " Very slow and deliberate pace."
 
+        # Arricchisci instruct con le note dialogiche (se la scena contiene dialogo)
+        dialogue_notes = payload.get("dialogue_notes")
+        if dialogue_notes and payload.get("has_dialogue", False):
+            instruct = f"{instruct} Character notes: {dialogue_notes}"
+            logger.info(f"Enriched instruct with dialogue_notes: {dialogue_notes[:60]}...")
+
         # ── Chiamata al server ───────────────────────────────────────────────
         request_body = {
             "text":                   text,
+            "voice_id":               voice_id,
             "voice_ref_audio_path":   voice_ref_path_str,
             "voice_ref_text":         payload.get("voice_ref_text"),
             "language":               payload.get("language", "Italian"),
@@ -145,12 +144,16 @@ class Qwen3TTSBackend:
             "max_words_per_chunk":    payload.get("chunking", {}).get("max_words_per_chunk", 250),
             "gap_between_chunks_ms":  payload.get("chunking", {}).get("gap_between_chunks_ms", 80),
             "output_filename":        output_filename,
+            "subtalker_temperature":  payload.get("subtalker_temperature", 0.4),
+            "subtalker_top_k":        payload.get("subtalker_top_k", 50),
+            "subtalker_top_p":        payload.get("subtalker_top_p", 0.9),
         }
 
         timeout = payload.get("timeout_seconds", 3600)
+        voice_ref_name = Path(voice_ref_path_str).name if voice_ref_path_str else "None"
         logger.info(
             f"Qwen3 request | job={job_id} | words={len(text.split())} | "
-            f"voice={Path(voice_ref_path_str).name} | emotion={instruct[:40]}..."
+            f"voice={voice_ref_name} | emotion={instruct[:40]}..."
         )
 
         try:

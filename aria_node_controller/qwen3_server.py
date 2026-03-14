@@ -32,8 +32,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from qwen_tts import Qwen3TTSModel
 
+import argparse
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Configurazione
+# Configurazione & CLI
 # ──────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -42,11 +44,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("qwen3-tts-server")
 
-MODEL_PATH   = os.getenv("QWEN3_MODEL_PATH",  r"C:/Users/Roberto/aria/data/models/qwen3-tts-1.7b")
-OUTPUT_DIR   = Path(os.getenv("ARIA_OUTPUT_DIR", r"C:/Users/Roberto/aria/data/outputs"))
+def parse_args():
+    parser = argparse.ArgumentParser(description="ARIA Qwen3-TTS Server")
+    parser.add_argument("--model-path", type=str, 
+                        default=os.getenv("QWEN3_MODEL_PATH", r"C:/Users/Roberto/aria/data/models/qwen3-tts-1.7b"),
+                        help="Path al checkpoint del modello")
+    parser.add_argument("--host", type=str, 
+                        default=os.getenv("QWEN3_HOST", "0.0.0.0"),
+                        help="Bind address")
+    parser.add_argument("--port", type=int, 
+                        default=int(os.getenv("QWEN3_PORT", "8083")),
+                        help="Porta del server")
+    parser.add_argument("--output-dir", type=str,
+                        default=os.getenv("ARIA_OUTPUT_DIR", r"C:/Users/Roberto/aria/data/outputs"),
+                        help="Directory per i file WAV generati")
+    return parser.parse_args()
 
-HOST         = os.getenv("QWEN3_HOST",  "0.0.0.0")
-PORT         = int(os.getenv("QWEN3_PORT", "8083"))
+args = parse_args()
+
+MODEL_PATH   = args.model_path
+OUTPUT_DIR   = Path(args.output_dir)
+HOST         = args.host
+PORT         = args.port
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,6 +74,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Stato globale
 # ──────────────────────────────────────────────────────────────────────────────
 model = None
+model_type = "base"  # "base" o "custom_voice"
+supported_speakers = []
 app   = FastAPI(title="Qwen3-TTS Server", version="1.0.0",
                 description="ARIA Qwen3-TTS 1.7B — porta 8083")
 
@@ -63,7 +84,7 @@ app   = FastAPI(title="Qwen3-TTS Server", version="1.0.0",
 # Caricamento modello
 # ──────────────────────────────────────────────────────────────────────────────
 def load_model():
-    global model
+    global model, model_type, supported_speakers
     logger.info(f"Caricamento Qwen3-TTS 1.7B su {DEVICE} (path: {MODEL_PATH})...")
     t0 = time.time()
 
@@ -82,6 +103,14 @@ def load_model():
         logger.warning(f"Flash attention non disponibile ({type(e).__name__}), caricamento standard.")
         model = Qwen3TTSModel.from_pretrained(MODEL_PATH, **common_kwargs)
         attn_mode = "standard"
+
+    # Rilevamento tipo modello (Base vs CustomVoice)
+    model_type = getattr(model.model, "tts_model_type", "base")
+    if model_type == "custom_voice":
+        supported_speakers = model.get_supported_speakers()
+        logger.info(f"Rilevato modello CUSTOM_VOICE. Speaker supportati: {supported_speakers}")
+    else:
+        logger.info("Rilevato modello BASE (Zero-shot cloning supportato).")
 
     elapsed = time.time() - t0
     vram_gb = torch.cuda.memory_allocated() / 1e9 if DEVICE == "cuda" else 0
@@ -126,7 +155,8 @@ def concatenate_wavs(wav_list: list[np.ndarray], sr: int, gap_ms: int = 80) -> n
 # ──────────────────────────────────────────────────────────────────────────────
 class TTSRequest(BaseModel):
     text: str
-    voice_ref_audio_path: str
+    voice_ref_audio_path: Optional[str] = None
+    voice_id: Optional[str] = None
     voice_ref_text: Optional[str] = None
     language: str = "Italian"
     instruct: str = "Warm Italian male voice, professional audiobook narrator, calm and measured."
@@ -143,7 +173,10 @@ class TTSRequest(BaseModel):
     max_words_per_chunk: int = 250
     gap_between_chunks_ms: int = 80
 
-    # Output
+    # Subtalker parameters (Acoustic detail & Prosody stability)
+    subtalker_temperature: Optional[float] = 0.4 
+    subtalker_top_k: Optional[int] = 50
+    subtalker_top_p: Optional[float] = 0.9
     output_filename: str = "output.wav"
 
 
@@ -158,74 +191,97 @@ def health():
     vram_gb = torch.cuda.memory_allocated() / 1e9 if DEVICE == "cuda" else 0
     return {
         "status": "ok",
-        "model": "Qwen3-TTS-12Hz-1.7B-Base",
+        "model_type": model_type,
         "device": DEVICE,
         "vram_allocated_gb": round(vram_gb, 2),
         "output_dir": str(OUTPUT_DIR),
+        "supported_speakers": supported_speakers if model_type == "custom_voice" else None
     }
 
 
 @app.post("/tts")
 def synthesize(req: TTSRequest):
-    """Sintetizza testo con voice cloning e chunking automatico."""
+    """Sintetizza testo con logica differenziata per Base (Cloning) vs CustomVoice."""
     if model is None:
         raise HTTPException(status_code=503, detail="Modello non caricato")
 
     t_start = time.time()
 
-    # Carica audio di riferimento
-    ref_path = Path(req.voice_ref_audio_path)
-    if not ref_path.exists():
-        raise HTTPException(status_code=400, detail=f"File ref non trovato: {req.voice_ref_audio_path}")
+    # ── Gestione Speaker / Ref ───────────────────────────────────────────
+    ref_audio = None
+    ref_sr = 24000
+    target_speaker = None
 
-    try:
-        ref_audio, ref_sr = sf.read(str(ref_path))
-        if ref_audio.ndim > 1:
-            ref_audio = ref_audio[:, 0]  # forzatura mono
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Errore lettura ref audio: {e}")
-
-    ref_duration = len(ref_audio) / ref_sr
-    if ref_duration > 30:
-        logger.warning(f"Sample di riferimento lungo {ref_duration:.1f}s — rischio loop (max 30s).")
+    if model_type == "custom_voice":
+        # Mappatura dello speaker. Se voice_id o voice_ref_name è nei supportati, usalo.
+        # Altrimenti fallback a 'ryan' (maschio) o 'serena' (femmina) arbitrariamente.
+        speaker_candidate = (req.voice_id or "").lower()
+        if speaker_candidate in supported_speakers:
+            target_speaker = speaker_candidate
+        else:
+            # Fallback intelligente: se la voce è 'luca', usiamo 'ryan'
+            fallback_map = {"luca": "ryan", "giulia": "serena"}
+            target_speaker = fallback_map.get(speaker_candidate, "ryan")
+            logger.warning(f"Speaker '{speaker_candidate}' non supportato da CustomVoice. Fallback su '{target_speaker}'.")
+    else:
+        # Modello BASE: richiede ref_audio per il cloning
+        ref_path = Path(req.voice_ref_audio_path or "")
+        if not ref_path.exists():
+             raise HTTPException(status_code=400, detail=f"File ref richiesto per modello Base: {req.voice_ref_audio_path}")
+        
+        try:
+            ref_audio, ref_sr = sf.read(str(ref_path))
+            if ref_audio.ndim > 1:
+                ref_audio = ref_audio[:, 0]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Errore lettura ref audio: {e}")
 
     # Chunking
     chunks = chunk_text(req.text, req.max_words_per_chunk)
-    logger.info(f"Testo suddiviso in {len(chunks)} chunk | ref: {ref_path.name} ({ref_duration:.1f}s)")
+    logger.info(f"Sintesi {model_type} | {len(chunks)} chunk | target={target_speaker or 'cloning'}")
     torch.cuda.reset_peak_memory_stats()
 
     wav_chunks = []
     output_sr = req.output_sample_rate
 
     for i, chunk_text_part in enumerate(chunks):
-        n_words = len(chunk_text_part.split())
-        logger.info(f"  Chunk {i+1}/{len(chunks)}: {n_words} parole")
         try:
-            is_x_vector_only = (req.voice_ref_text is None)
-            ref_input = (ref_audio, ref_sr)
-
-            wavs, sr = model.generate_voice_clone(
-                text=chunk_text_part,
-                ref_audio=ref_input,
-                ref_text=req.voice_ref_text,   # None è ok se x_vector_only_mode=True
-                language=req.language,
-                instruct=req.instruct,
-                non_streaming_mode=req.non_streaming_mode,
-                x_vector_only_mode=is_x_vector_only,
-                max_new_tokens=req.max_new_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                repetition_penalty=req.repetition_penalty,
-            )
+            if model_type == "custom_voice":
+                wavs, sr = model.generate_custom_voice(
+                    text=chunk_text_part,
+                    speaker=target_speaker,
+                    language=req.language,
+                    instruct=req.instruct,
+                    non_streaming_mode=req.non_streaming_mode,
+                    max_new_tokens=req.max_new_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    repetition_penalty=req.repetition_penalty,
+                    subtalker_temperature=req.subtalker_temperature,
+                    subtalker_top_k=req.subtalker_top_k,
+                    subtalker_top_p=req.subtalker_top_p,
+                )
+            else:
+                is_x_vector_only = (req.voice_ref_text is None)
+                wavs, sr = model.generate_voice_clone(
+                    text=chunk_text_part,
+                    ref_audio=(ref_audio, ref_sr),
+                    ref_text=req.voice_ref_text,
+                    language=req.language,
+                    instruct=req.instruct,
+                    non_streaming_mode=req.non_streaming_mode,
+                    x_vector_only_mode=is_x_vector_only,
+                    max_new_tokens=req.max_new_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    repetition_penalty=req.repetition_penalty,
+                )
             output_sr = sr
             wav_chunks.append(wavs[0] if isinstance(wavs, list) else wavs)
-        except torch.cuda.OutOfMemoryError:
-            logger.error(f"OOM su chunk {i+1} — chunk troppo lungo o VRAM insufficiente")
-            raise HTTPException(status_code=500,
-                                detail=f"CUDA OOM su chunk {i+1}/{len(chunks)}. Riduci max_words_per_chunk.")
         except Exception as e:
             logger.error(f"Errore chunk {i+1}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Errore inferenza chunk {i+1}: {e}")
+
 
     # Concatenazione
     final_wav = concatenate_wavs(wav_chunks, output_sr, req.gap_between_chunks_ms)

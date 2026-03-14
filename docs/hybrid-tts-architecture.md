@@ -76,6 +76,9 @@ I moderni modelli TTS autoregressivi hanno difetti congeniti che ARIA risolve au
 3. Li concatenano in un singolo file WAV finale immettendo `80 millisecondi` fisiologici di silenzio tra le frasi ("respiro").
 Il client ottiene 1 solo file WAV perfetto a prescindere dalla larghezza in input.
 
+### Gestione Naming (Determinismo)
+Per workflow di produzione narrativa (DIAS), ARIA adotta una politica di **Naming Coerente**: il client può imporre il nome del file finale inviando un `job_id` descrittivo. Questo trasforma l'output di ARIA da un semplice buffer temporaneo a un asset persistente rintracciabile deterministicamente via HTTP, eliminando la necessità di database di mappatura complessi tra i due sistemi.
+
 ---
 
 ## 4. In-Context Learning (ICL) Dinamico

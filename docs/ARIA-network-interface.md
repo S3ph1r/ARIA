@@ -23,7 +23,8 @@ Every ARIA node signals its presence on Redis to allow for central monitoring.
   "node_ip": "192.168.1.139",
   "status": "online | paused",
   "last_seen": "ISO-8601-Timestamp",
-  "active_backends": ["qwen3-tts-1.7b", "fish-s1-mini"]
+  "active_backends": ["qwen3-tts-1.7b", "fish-s1-mini"],
+  "available_voices": ["angelo", "luca", "narratore"]
 }
 ```
 
@@ -41,10 +42,12 @@ Tasks are submitted to model-specific FIFO queues.
   "job_id": "unique-uuid",
   "client_id": "app-name",
   "model_type": "tts | llm | music",
-  "model_id": "specific-model-name",
+  "model_id": "specific-model-name",  // Identificativo per il caricamento JIT (es. qwen3-tts-custom)
+
   "payload": {
       "text": "Content to process",
       "voice_id": "optional-intent",
+      "voice_override": "luca",
       "...": "model-specific params"
   },
   "callback_key": "redis-key-for-result",

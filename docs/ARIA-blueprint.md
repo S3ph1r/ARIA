@@ -261,9 +261,11 @@ gpu:result:{client_id}:{job_id}       # String JSON, TTL configurabile
   es: gpu:result:dias-minipc:uuid-123
 
 # Stato Server (scritto dal Server ogni 10s)
-gpu:server:status                     # Hash
+gpu:server:status                     # Hash: {status, active_backends, available_voices, vram}
 gpu:server:semaphore                  # String: "green" | "red" | "busy"
 gpu:server:heartbeat                  # Timestamp ultimo heartbeat
+
+**Heartbeat Dinamico**: Il registro dello stato (`gpu:server:status`) include un array `available_voices` che scansiona in tempo reale la cartella locale `%ARIA_ROOT%\data\voices\`. Questo permette ai client (es. Dashboard DIAS) di mostrare solo le voci effettivamente pronte all'uso senza configurazioni statiche.
 
 # Task scaduti (scritti dal Client Watcher)
 gpu:dead:{client_id}:{job_id}         # Hash con motivo scadenza
@@ -462,6 +464,8 @@ risolve i parametri dalla sua libreria interna.
   "output_format": "wav"
 }
 ```
+
+*Nota Architetturale sulle Pause*: ARIA si occupa unicamente di generare l'audio "raw". La gestione delle pause drammatiche e della spaziatura strutturale tra le battute/micro-scene è delegata in toto al client (es. DIAS Stage F Audio Mixer) tramite l'assemblaggio dei WAV. ARIA non inietta silenzi artificiali per rispettare il principio di disaccoppiamento.
 
 *Nota: La versione legacy con `file_refs` e `voice_sample_ref` resta supportata 
 solo per campioni temporanei "one-shot" non presenti in libreria.*

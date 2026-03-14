@@ -12,6 +12,7 @@ import subprocess
 
 from pathlib import Path
 from .queue_manager import AriaQueueManager
+from .cloud_manager import CloudManager
 from .batch_optimizer import BatchOptimizer
 from .logger import get_logger
 import re
@@ -64,18 +65,25 @@ class ModelProcessManager:
 
     MODEL_CONFIGS = {
         "fish-s1-mini": {
+            "port":         8080,
             "health_url":   "http://localhost:8080/v1/health",
             "startup_wait": 90,
-            # Compagno che va avviato PRIMA di fish-s1-mini
             "companion":    "voice-cloning",
         },
         "voice-cloning": {
+            "port":         8081,
             "health_url":   "http://localhost:8081/health",
             "startup_wait": 60,
         },
         "qwen3-tts-1.7b": {
+            "port":         8083,
             "health_url":   "http://localhost:8083/health",
-            "startup_wait": 120,   # JIT CUDA primo avvio
+            "startup_wait": 240,
+        },
+        "qwen3-tts-custom": {
+            "port":         8083,  # Stessa porta di Qwen3 Base (Mutuamente esclusivi)
+            "health_url":   "http://localhost:8083/health",
+            "startup_wait": 240,
         },
     }
 
@@ -106,11 +114,22 @@ class ModelProcessManager:
                 "--decoder-checkpoint-path", str(model_dir / "codec.pth"),
                 "--decoder-config-name",     "modded_dac_vq",
             ]
-        elif model_id == "qwen3-tts-1.7b":
-            # Usiamo l'ambiente Python 3.12 localizzato in aria/envs/qwen3tts
+        elif model_id in ["qwen3-tts-1.7b", "qwen3-tts-custom"]:
             python = str(self.aria_root / "envs" / "qwen3tts" / "python.exe")
             server = self.aria_root / "aria_node_controller" / "qwen3_server.py"
-            return [python, str(server)]
+            
+            # Determina il path del modello
+            model_sub = "qwen3-tts-1.7b" if model_id == "qwen3-tts-1.7b" else "qwen3-tts-1.7b-customvoice"
+            model_path = str(self.aria_root / "data" / "models" / model_sub)
+            
+            port = self.MODEL_CONFIGS[model_id]["port"]
+            
+            return [
+                python, 
+                str(server),
+                "--model-path", model_path,
+                "--port", str(port)
+            ]
         else:
             raise ValueError(f"Nessuna configurazione per model_id='{model_id}'")
 
@@ -142,7 +161,18 @@ class ModelProcessManager:
         """Avvia un singolo processo e attende il health check."""
 
         with self._lock:
-            # 1. Controllo proattivo: Il backend è già attivo e responsive (anche se esterno)?
+            # 0. Gestione Conflitti Porta (SOA v2.1)
+            # Se un ALTRO modello sta usando la stessa porta, dobbiamo killarlo 
+            # per liberare la GPU e il socket.
+            target_port = self.MODEL_CONFIGS[model_id].get("port")
+            if target_port:
+                for other_id, other_config in self.MODEL_CONFIGS.items():
+                    if other_id != model_id and other_config.get("port") == target_port:
+                        if self._is_proc_active(other_id):
+                            logger.info(f"Port Conflict: {other_id} occupa porta {target_port}. Termino per far posto a {model_id}...")
+                            self._kill_proc(other_id)
+
+            # 1. Controllo proattivo...
             if self._health_check(model_id):
                 logger.info(f"{model_id}: backend già attivo e responsivo (rilevato esternamente).")
                 self._idle_since.pop(model_id, None)
@@ -255,6 +285,11 @@ class ModelProcessManager:
                 logger.info(f"{model_id}: processo terminato.")
             self._procs.pop(model_id, None)
 
+    def _is_proc_active(self, model_id: str) -> bool:
+        """Ritorna True se il processo è registrato e ancora attivo."""
+        proc = self._procs.get(model_id)
+        return proc is not None and proc.poll() is None
+
     def shutdown_all(self):
         """Termina tutti i backend (e companion) all'arresto dell'orchestratore."""
         for model_id in list(self._procs.keys()):
@@ -307,10 +342,15 @@ class NodeOrchestrator:
         # Backend Qwen3 (istanza lazy, inizializzata al primo task)
         self._qwen3_backend = Qwen3TTSBackend() if _QWEN3_AVAILABLE else None
 
-        # Process Manager — avvio/spegnimento on-demand dei backend TTS
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
             miniconda_root=MINICONDA_ROOT,
+        )
+
+        # Cloud Manager — handles sequential API tasks (Gemini, etc.)
+        self.cloud_manager = CloudManager(
+            queue_manager=self.qm,
+            aria_root=ARIA_ROOT
         )
 
         
@@ -336,7 +376,11 @@ class NodeOrchestrator:
         # Avvia Backend Orchestrator
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        logger.info("Orchestrator task loop started")
+        
+        # Start Cloud Manager
+        self.cloud_manager.start()
+        
+        logger.info("Orchestrator task loop and CloudManager started")
         
         # Avvia HTTP Asset Server Parallelo
         self.http_thread = threading.Thread(target=self._start_http_server, daemon=True)
@@ -345,6 +389,7 @@ class NodeOrchestrator:
     def stop(self):
         self.running = False
         self.process_manager.shutdown_all()   # termina Fish e Qwen3 se attivi
+        self.cloud_manager.stop()            # ferma il loop cloud
         # Server HTTP gestirà al massimo una richiesta fake per sbloccarsi
         try:
              requests.get(f"http://127.0.0.1:{HTTP_PORT}/", timeout=1)
@@ -387,14 +432,20 @@ class NodeOrchestrator:
             logger.error(f"Failed to send heartbeat: {e}")
 
     def _run_loop(self):
+        # Base models known by the node
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom"]
         current_model = None
-        known_models = {
-            "fish-s1-mini":    BatchOptimizer.build_queue_key("tts", "fish-s1-mini"),
-            "qwen3-tts-1.7b": BatchOptimizer.build_queue_key("tts", "qwen3-tts-1.7b"),
-        }
         
         last_heartbeat = 0
         while self.running:
+            # 1. Discover all active LOCAL queues for these models
+            # Pattern: global:queue:*:local:{model_id}:*
+            known_models = {}
+            for model_id in model_logic_ids:
+                pattern = self.optimizer.build_queue_key("*", model_id, "local", "*")
+                for q_key in self.qm.redis.scan_iter(match=pattern):
+                    # Map the specific client queue to the model logic ID for the optimizer
+                    known_models[f"{model_id}:{q_key}"] = q_key
             # Heartbeat ogni 20 secondi
             if time.time() - last_heartbeat > 20:
                 self._send_heartbeat()
@@ -508,7 +559,7 @@ class NodeOrchestrator:
             self.qm.post_result(task, result)
             return
 
-        if task.model_id == "qwen3-tts-1.7b":
+        if task.model_id.startswith("qwen3-tts"):
             self._process_qwen3_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
             try:
@@ -704,7 +755,16 @@ class NodeOrchestrator:
         """Dispatch di un task TTS verso Qwen3TTSBackend."""
         if not self._qwen3_backend:
             raise RuntimeError("Qwen3TTSBackend non disponibile (import fallito).")
+        
+        # Garantisce che il modello corretto sia in esecuzione (Gestione Swap JIT)
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend Qwen3 per {task.model_id}")
+
         try:
+            # Assicura che il job_id sia presente nel payload per il salvataggio file
+            if "job_id" not in task.payload:
+                task.payload["job_id"] = task.job_id
+
             result_data = self._qwen3_backend.run(
                 payload=task.payload,
                 aria_root=ARIA_ROOT,

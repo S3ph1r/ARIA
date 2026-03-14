@@ -17,8 +17,8 @@ class AriaQueueManager:
     """
     
     # Internal prefixes
-    PREFIX_PROCESSING = "gpu:processing"
-    PREFIX_DEAD = "gpu:dead"
+    PREFIX_PROCESSING = "global:processing"
+    PREFIX_DEAD = "global:dead"
     MAX_RETRIES = 3
 
     def __init__(self, redis_client: redis.Redis):
@@ -46,8 +46,9 @@ class AriaQueueManager:
                 job_id = task_data.get("job_id")
                 client_id = task_data.get("client_id")
                 model_type = task_data.get("model_type")
+                provider = task_data.get("provider", "local")
                 model_id = task_data.get("model_id")
-                queue_key = f"gpu:queue:{model_type}:{model_id}"
+                queue_key = f"global:queue:{model_type}:{provider}:{model_id}:{client_id}"
                 
                 # Circuit breaker check
                 if task_data["retry_count"] >= self.MAX_RETRIES:
