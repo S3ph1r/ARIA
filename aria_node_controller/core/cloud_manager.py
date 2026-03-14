@@ -100,6 +100,14 @@ class CloudManager:
 
         worker_script = self.aria_root / "aria_node_controller" / "backends" / "cloud" / "gemini_worker.py"
         
+        # Select best python for cloud worker
+        # On Windows (PC 139), we want the isolated aria-cloud env if it exists
+        worker_python = sys.executable
+        win_cloud_env = self.aria_root / "envs" / "aria-cloud" / "python.exe"
+        if os.name == "nt" and win_cloud_env.exists():
+            worker_python = str(win_cloud_env)
+            logger.info(f"Using isolated cloud environment: {worker_python}")
+        
         try:
             logger.info(f"Spawning worker process for task {task.job_id}...")
             
@@ -109,10 +117,8 @@ class CloudManager:
             worker_payload["client_id"] = task.client_id
             
             # Execute worker sequentially (blocking)
-            # We use the same python interpreter (for now) or a specific conda cmd
-            # User mentioned using a bat or conda env on Win11 later.
             result_process = subprocess.run(
-                [sys.executable, str(worker_script), json.dumps(worker_payload)],
+                [worker_python, str(worker_script), json.dumps(worker_payload)],
                 capture_output=True,
                 text=True,
                 check=False
