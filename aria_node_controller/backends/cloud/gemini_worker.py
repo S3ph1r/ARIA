@@ -25,10 +25,9 @@ def main():
             raise ValueError("Missing payload argument")
         
         payload = json.loads(sys.argv[1])
-        book_id = payload.get("book_id", "unknown")
         job_id = payload.get("job_id", "unknown")
         
-        logger.info(f"Gemini Worker started for job {job_id} (book {book_id})")
+        logger.info(f"Gemini Worker started for job {job_id}. Received payload: {payload}")
 
         # 3. Load Environment
         load_dotenv()
