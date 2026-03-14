@@ -45,7 +45,8 @@ def main():
         # 5. Execute Gemini Call
         client = genai.Client(api_key=api_key)
         
-        model_name = payload.get("model", "gemini-1.5-flash")
+        # Use model_id if provided, otherwise default to gemini-1.5-flash
+        model_name = payload.get("model_id") or payload.get("model") or "gemini-1.5-flash"
         contents   = payload.get("contents")
         config     = payload.get("config", {})
 

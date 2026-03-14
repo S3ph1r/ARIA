@@ -117,6 +117,7 @@ class CloudManager:
             worker_payload = task.payload.copy()
             worker_payload["job_id"] = task.job_id
             worker_payload["client_id"] = task.client_id
+            worker_payload["model_id"] = task.model_id
             
             # Execute worker sequentially (blocking)
             result_process = subprocess.run(
