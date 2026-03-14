@@ -1,65 +1,67 @@
-import os
 import sys
 import json
-import logging
-from typing import Dict, Any
+import os
 from pathlib import Path
-from dotenv import load_dotenv
 
-# Optional: ensure we are in the right directory or have path setup
-# to load internal ARIA utils if needed, but for now we keep it minimal.
+# Tentativo di setup SDK Google in ambiente isolato
+try:
+    import google.generativeai as genai
+except ImportError:
+    # Se fallisce qui, il worker non può funzionare
+    print(json.dumps({"status": "error", "error": "google-generativeai non installato", "error_code": "SDK_MISSING"}))
+    sys.exit(0)
 
 def main():
-    """
-    Main entry point for the Gemini worker process.
-    Expected usage: python gemini_worker.py <payload_json>
-    Outputs JSON result to stdout.
-    """
+    if len(sys.argv) < 2:
+        # Leggi da stdin se non passato via arg
+        input_data = sys.stdin.read()
+    else:
+        input_data = sys.argv[1]
+
     try:
-        # 1. Setup Logging (to stderr so it doesn't pollute stdout JSON)
-        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-        logger = logging.getLogger("gemini_worker")
-
-        # 2. Parse Input
-        if len(sys.argv) < 2:
-            raise ValueError("Missing payload argument")
+        task = json.loads(input_data)
         
-        payload = json.loads(sys.argv[1])
-        job_id = payload.get("job_id", "unknown")
-        
-        logger.info(f"Gemini Worker started for job {job_id}. Received payload: {payload}")
-
-        # 3. Load Environment
-        load_dotenv()
-        api_key = os.getenv("GOOGLE_API_KEY")
+        # 1. Recupero API Key (Priorità: payload config -> Env)
+        api_key = task.get("config", {}).get("api_key") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            raise RuntimeError("GOOGLE_API_KEY not found in environment.")
+            raise ValueError("GOOGLE_API_KEY mancante")
 
-        # 4. Import SDK (only inside the process to avoid main-process overhead)
-        try:
-            import google.genai as genai
-        except ImportError:
-            raise ImportError("Libreria 'google-genai' non installata nell'ambiente del worker.")
+        genai.configure(api_key=api_key)
 
-        # 5. Execute Gemini Call
-        client = genai.Client(api_key=api_key)
-        
-        # Use model_id if provided, otherwise default to gemini-1.5-flash
-        model_name = payload.get("model_id") or payload.get("model") or "gemini-1.5-flash"
-        contents   = payload.get("contents")
-        config     = payload.get("config", {})
+        # 2. Configurazione Modello
+        model_name = task.get("model_id", "gemini-flash-lite-latest")
+        model = genai.GenerativeModel(model_name)
+
+        # 3. Preparazione Payload (Standard Google: contents)
+        # Se DIAS invia 'messages' (OpenAI), convertiamo in 'contents' (Google)
+        contents = task.get("contents")
+        if not contents:
+            messages = task.get("messages", [])
+            contents = []
+            for m in messages:
+                role = "user" if m["role"] == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": m["content"]}]})
 
         if not contents:
-            raise ValueError("Payload must contain 'contents'")
+            # Fallback a text se presente
+            text = task.get("text", "")
+            if text:
+                contents = [{"role": "user", "parts": [{"text": text}]}]
+            else:
+                raise ValueError("Nessun contenuto valido nel payload (contents/messages/text)")
 
-        logger.info(f"Calling Gemini ({model_name})...")
-        response = client.models.generate_content(
-            model=model_name,
+        # 4. Generazione (Blocking)
+        config = {
+            "temperature": task.get("config", {}).get("temperature", 0.7),
+            "max_output_tokens": task.get("config", {}).get("max_tokens", 4096),
+        }
+
+        response = model.generate_content(
             contents=contents,
-            config=config
+            generation_config=config
         )
 
-        # 6. Return Success result as JSON on stdout
+        # 5. Ritorno Risultato su stdout
         result = {
             "status": "success",
             "output": {
@@ -71,18 +73,16 @@ def main():
         print(json.dumps(result))
 
     except Exception as e:
-        # Return Error result as JSON
         result = {
             "status": "error",
             "error": str(e),
             "error_code": "GEMINI_WORKER_FAILED"
         }
-        # Check for 429 specifically
         if "429" in str(e) or "exhausted" in str(e).lower():
             result["error_code"] = "QUOTA_EXHAUSTED"
             
         print(json.dumps(result))
-        sys.exit(0) # Exit with 0 to allow the manager to read the JSON result
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()

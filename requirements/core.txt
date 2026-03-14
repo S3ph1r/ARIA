@@ -1,0 +1,10 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic>=2.0
+python-multipart
+python-dotenv
+redis
+httpx
+requests
+psutil
+types-requests

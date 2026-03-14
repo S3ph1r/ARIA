@@ -173,6 +173,7 @@ Fish usa la Voice Library condivisa con Qwen3:
 
 ```
 %ARIA_ROOT%\data\voices\
+├── angelo/                 ← Disponibile (ref.wav present)
 ├── luca/
 │   ├── ref.wav             ← Usato da Fish TTS
 │   ├── ref_padded.wav      ← Usato da Qwen3 TTS

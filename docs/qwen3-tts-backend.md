@@ -56,9 +56,9 @@ Per ARIA/DIAS usare **esclusivamente** `Qwen3-TTS-12Hz-1.7B-Base`:
 
 | Variante | Param | VRAM | Uso |
 |----------|-------|------|-----|
-| `12Hz-1.7B-Base` | 1.7B | ~4-5 GB | ✅ Voice cloning + Instruct (Base) |
+| `12Hz-1.7B-Base` | 1.7B | ~4-5 GB | ✅ `qwen3-tts-1.7b` |
 | `12Hz-0.6B-Base` | 0.6B | ~4 GB | ❌ Bug long-silence |
-| `12Hz-1.7B-CustomVoice` | 1.7B | ~6 GB | ✅ Alta espressività + Instruct (Full) |
+| `12Hz-1.7B-CustomVoice` | 1.7B | ~6 GB | ✅ `qwen3-tts-1.7b-customvoice` |
 
 ---
 
@@ -235,7 +235,8 @@ Qwen3 usa la Voice Library condivisa con Fish, con la differenza del padding:
 
 ```
 %ARIA_ROOT%\data\voices\
-├── luca/
+├── angelo/                 ← Voce Narratore Maschile (Calda)
+├── luca/                   ← Voce Narratore Maschile (Tecnica/Narrativa)
 │   ├── ref.wav             ← sample originale (NON usato da Qwen3)
 │   ├── ref_padded.wav      ← sample + 0.5s silenzio (USATO da Qwen3)
 │   └── ref.txt             ← trascrizione (ICL opzionale)

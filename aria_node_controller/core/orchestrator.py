@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from .queue_manager import AriaQueueManager
 from .cloud_manager import CloudManager
+from .rate_limiter import GeminiRateLimiter
 from .batch_optimizer import BatchOptimizer
 from .logger import get_logger
 import re
@@ -21,13 +22,15 @@ from .models import AriaTaskResult
 # Backends
 try:
     from backends.qwen3_tts import Qwen3TTSBackend
-    _QWEN3_AVAILABLE = True
+    from backends.qwen35_llm import Qwen35LLMBackend
+    _BACKENDS_AVAILABLE = True
 except ImportError:
     try:
         from ..backends.qwen3_tts import Qwen3TTSBackend
-        _QWEN3_AVAILABLE = True
+        from ..backends.qwen35_llm import Qwen35LLMBackend
+        _BACKENDS_AVAILABLE = True
     except ImportError:
-        _QWEN3_AVAILABLE = False
+        _BACKENDS_AVAILABLE = False
 
 
 logger = get_logger("node.orchestrator")
@@ -36,15 +39,19 @@ FISH_TTS_HOST    = "http://localhost:8080"
 FISH_ENCODE_HOST = "http://localhost:8081"
 QWEN3_TTS_HOST   = "http://localhost:8083"
 
-# Directory Windows — auto-detect basato sull'utente corrente
-ARIA_ROOT       = Path(os.path.expanduser("~")) / "aria" if os.name == "nt" else Path(r"C:\Users\Roberto\aria")
+# Directory e Path — auto-detect basato sul sistema operativo
+if os.name == "nt":
+    ARIA_ROOT      = Path(os.path.expanduser("~")) / "aria"
+    MINICONDA_ROOT = Path(os.path.expanduser("~")) / "miniconda3"
+else:
+    # Linux LXC (Based on project structure)
+    ARIA_ROOT      = Path("/home/Projects/NH-Mini/sviluppi/ARIA")
+    MINICONDA_ROOT = Path("/home/roberto/miniconda3") # Standard paths
+
 ARIA_OUTPUT_DIR = ARIA_ROOT / "data" / "outputs"
 HTTP_PORT       = 8082
 
-# Miniconda root — auto-detect
-MINICONDA_ROOT = Path(os.path.expanduser("~")) / "miniconda3" if os.name == "nt" else Path(r"C:\Users\Roberto\miniconda3")
-
-# Secondi di coda vuota prima di terminare un backend (45 minuti)
+# Secondi di coda vuota prima di terminare un backend
 IDLE_TIMEOUT_S = 2700
 
 
@@ -84,6 +91,11 @@ class ModelProcessManager:
             "port":         8083,  # Stessa porta di Qwen3 Base (Mutuamente esclusivi)
             "health_url":   "http://localhost:8083/health",
             "startup_wait": 240,
+        },
+        "qwen3.5-35b-moe-q3ks": {
+            "port":         8085,
+            "health_url":   "http://localhost:8085/v1/health", # Fallback check
+            "startup_wait": 300,
         },
     }
 
@@ -130,6 +142,10 @@ class ModelProcessManager:
                 "--model-path", model_path,
                 "--port", str(port)
             ]
+        elif model_id == "qwen3.5-35b-moe-q3ks":
+            python = str(self.aria_root / "envs" / "nh-qwen35-llm" / "python.exe")
+            server = self.aria_root / "aria_node_controller" / "llm_server.py"
+            return [python, str(server)]
         else:
             raise ValueError(f"Nessuna configurazione per model_id='{model_id}'")
 
@@ -339,18 +355,23 @@ class NodeOrchestrator:
         # Cache RAM per token cloni
         self.token_cache = {}
 
-        # Backend Qwen3 (istanza lazy, inizializzata al primo task)
-        self._qwen3_backend = Qwen3TTSBackend() if _QWEN3_AVAILABLE else None
+        # Backend lazy instances
+        self._qwen3_backend = Qwen3TTSBackend() if _BACKENDS_AVAILABLE else None
+        self._qwen35_backend = Qwen35LLMBackend() if _BACKENDS_AVAILABLE else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
             miniconda_root=MINICONDA_ROOT,
         )
 
+        # Global Rate Limiter for Cloud Tasks
+        self.rate_limiter = GeminiRateLimiter(redis_client=redis_client)
+
         # Cloud Manager — handles sequential API tasks (Gemini, etc.)
         self.cloud_manager = CloudManager(
             queue_manager=self.qm,
-            aria_root=ARIA_ROOT
+            aria_root=ARIA_ROOT,
+            rate_limiter=self.rate_limiter
         )
 
         
@@ -421,7 +442,9 @@ class NodeOrchestrator:
             from datetime import datetime, timezone
             status = {
                 "node_ip": self.local_ip,
-                "status": "online" if self.semaphore_green else "paused",
+                "status": "online",  # The node/gateway itself is online
+                "gpu_status": "online" if self.semaphore_green else "paused",
+                "cloud_status": "online",  # Cloud tasks are decoupled from GPU semaphore
                 "last_seen": datetime.now(timezone.utc).isoformat(),
                 "active_backends": list(self.process_manager._procs.keys()),
                 "available_voices": self._discover_voices(),
@@ -433,7 +456,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks"]
         current_model = None
         
         last_heartbeat = 0
@@ -561,6 +584,8 @@ class NodeOrchestrator:
 
         if task.model_id.startswith("qwen3-tts"):
             self._process_qwen3_task(task, start_t)
+        elif task.model_id == "qwen3.5-35b-moe-q3ks":
+            self._process_llm_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
             try:
                 # --- Intent-based Resolution (SOA v2.0) ---
@@ -788,6 +813,48 @@ class NodeOrchestrator:
             self.qm.post_result(task, result)
         except Exception as e:
             logger.error(f"Qwen3 task failed: {e}", exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e)
+            )
+            self.qm.post_result(task, result)
+    def _process_llm_task(self, task, start_t: float):
+        """Dispatch di un task LLM verso Qwen35LLMBackend."""
+        if not self._qwen35_backend:
+            raise RuntimeError("Qwen35LLMBackend non disponibile.")
+
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend LLM per {task.model_id}")
+
+        try:
+            result_data = self._qwen35_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip
+            )
+            duration_s = time.time() - start_t
+            
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output={
+                    "text":     result_data["text"],
+                    "thinking": result_data.get("thinking"),
+                    "usage":    result_data.get("usage")
+                }
+            )
+            self.qm.post_result(task, result)
+        except Exception as e:
+            logger.error(f"LLM task failed: {e}", exc_info=True)
             result = AriaTaskResult(
                 job_id=task.job_id,
                 client_id=task.client_id,

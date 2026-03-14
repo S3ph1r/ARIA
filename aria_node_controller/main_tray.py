@@ -86,8 +86,9 @@ def set_semaphore(icon, state):
     SEMAPHORE_GREEN = state
     # Aggiorna icona e tooltip
     color = "green" if state else "red"
+    gpu_desc = "GPU Disponibile" if state else "GPU Occupata (Gaming)"
     icon.icon = generate_icon_image(color)
-    icon.title = f"ARIA Node - {'ATTIVO (Semaforo Verde)' if state else 'IN PAUSA (Semaforo Rosso)'}"
+    icon.title = f"ARIA Gateway - {gpu_desc} | Cloud Gateway: ATTIVO"
     
     # Aggiorna Redis
     threading.Thread(target=update_redis_semaphore, args=(state,), daemon=True).start()
@@ -179,8 +180,8 @@ def setup(icon):
 
 def create_menu():
     return pystray.Menu(
-        item('🟢 GPU Disponibile (Verde)', menu_action_green, checked=lambda item: SEMAPHORE_GREEN, radio=True),
-        item('🔴 GPU Occupata (Gaming/Rosso)', menu_action_red, checked=lambda item: not SEMAPHORE_GREEN, radio=True),
+        item('🟢 GPU Libera (Workflow AI Completo)', menu_action_green, checked=lambda item: SEMAPHORE_GREEN, radio=True),
+        item('🔴 GPU Occupata (Solo Cloud Gateway)', menu_action_red, checked=lambda item: not SEMAPHORE_GREEN, radio=True),
         pystray.Menu.SEPARATOR,
         item('⚙️ Impostazioni...', menu_action_settings),
         pystray.Menu.SEPARATOR,

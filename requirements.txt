@@ -1,25 +1,4 @@
-# Core
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
-
-# GPU/AI
-torch==2.1.0
-torchaudio==2.1.0
-
-# Audio
-librosa==0.10.1
-soundfile==0.12.1
-
-# Utils
-python-dotenv==1.0.0
-redis==5.0.1
-httpx==0.25.2
-
-# Development
-pytest==7.4.3
-pytest-asyncio==0.21.1
-
-# Cloud AI
-google-genai==0.3.0
+# ARIA Meta-Requirements
+# Installa solo il core orchestrator di default.
+# Per backend specifici vedi cartella requirements/
+-r requirements/core.txt

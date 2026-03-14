@@ -1,5 +1,5 @@
 # NH-Mini Universal Inference Gateway
-## Visione Architetturale e Roadmap (v1.0)
+## Architettura Centrale e Orchestrazione (v2.0 - IMPLEMENTATO)
 **Data:** 12 Marzo 2026
 **Ecosistema:** NH-Mini (DIAS, ARIA, Future Apps)
 

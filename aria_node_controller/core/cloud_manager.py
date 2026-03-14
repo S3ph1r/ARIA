@@ -1,46 +1,50 @@
 import time
-import threading
 import logging
-import os
+import subprocess
 import json
-from typing import Dict, Any, Type, Optional
+import os
+import threading
 from pathlib import Path
-
-from .logger import get_logger
-from .models import AriaTaskPayload, AriaTaskResult
+from typing import Optional, Type
 from .queue_manager import AriaQueueManager
+from .models import AriaTaskPayload, AriaTaskResult
+from .rate_limiter import GeminiRateLimiter
 
-logger = get_logger("node.cloud")
+logger = logging.getLogger("node.cloud")
 
 class CloudManager:
     """
-    Manages sequential execution of cloud-based AI tasks.
-    Runs in a background thread to avoid blocking the GPU orchestrator.
-    
-    NOTE: Sequential mode ensures only one cloud task is processed at a time
-    by this manager, even if multiple backends are registered.
+    Manages cloud-based LLM tasks for ARIA.
+    Acts as a gateway to external providers (Gemini, Vertex, etc.) 
+    avoiding the local GPU semaphore.
     """
     
-    def __init__(self, queue_manager: AriaQueueManager, aria_root: Path):
+    def __init__(self, queue_manager: AriaQueueManager, aria_root: Path, rate_limiter: Optional[GeminiRateLimiter] = None):
         self.qm = queue_manager
         self.aria_root = aria_root
-        self.backends = {} # provider_id -> backend_class
+        self.rate_limiter = rate_limiter or GeminiRateLimiter(redis_client=queue_manager.redis)
         self._stop_event = threading.Event()
         self._thread = None
         
-    def register_backend(self, provider: str, backend_class: Type):
-        """Registers a backend class for a specific provider (e.g., 'google')."""
-        self.backends[provider] = backend_class
-        logger.info(f"Cloud backend registered for provider: {provider}")
+        # Determine the isolated environment for cloud tasks
+        self.cloud_env = None
+        python_exe = "python.exe" if os.name == "nt" else "python"
+        potential_env = aria_root / "envs" / "aria-cloud" / python_exe
+        if potential_env.exists():
+            self.cloud_env = str(potential_env)
+        else:
+            # Fallback to current sys.executable if specialized env not found
+            import sys
+            self.cloud_env = sys.executable
 
     def start(self):
         """Starts the background monitoring loop."""
         if self._thread and self._thread.is_alive():
             logger.warning("CloudManager is already running.")
             return
-            
+        
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._main_loop, daemon=True, name="CloudManagerLoop")
+        self._thread = threading.Thread(target=self._main_loop, daemon=True)
         self._thread.start()
         logger.info("CloudManager started (Sequential Mode).")
 
@@ -60,68 +64,62 @@ class CloudManager:
                 cloud_queues = list(self.qm.redis.scan_iter(match="global:queue:cloud:*:*:*"))
                 
                 if not cloud_queues:
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
 
-                task_processed = False
                 for queue_key in cloud_queues:
-                    # Fetch one task from the queue
-                    # fetch_task handles the 'global:processing' lock
+                    if self._stop_event.is_set(): break
+                    
+                    # Fetch one task (non-blocking here, we poll)
                     raw_json, task = self.qm.fetch_task(queue_key, timeout=1)
-                    
                     if task:
-                        # SEQUENTIAL EXECUTION:
-                        # We process the task directly in this loop thread.
-                        # This blocks the loop from fetching the next task 
-                        # until this one is finished.
-                        self._run_task(task)
-                        task_processed = True
-                        break # Go back to start of loop to check priorities/new queues
+                        logger.info(f"Processing cloud task {task.job_id} from {queue_key}")
+                        self.process_cloud_task(task)
+                        # Process one task per loop iteration to allow stop/check
                 
-                if not task_processed:
-                    # Small sleep if no tasks were found in any queue
-                    time.sleep(0.5)
-                    
-            except Exception as e:
-                logger.error(f"Error in CloudManager main loop: {e}")
-                time.sleep(2)
+                time.sleep(1) # Small rest between scans
 
-    def _run_task(self, task: AriaTaskPayload):
-        """Executes a single cloud task using an external process worker."""
-        import subprocess
-        import sys
-        
+            except Exception as e:
+                logger.error(f"Error in CloudManager main loop: {e}", exc_info=True)
+                time.sleep(5)
+
+    def process_cloud_task(self, task: AriaTaskPayload):
+        """
+        Executes a cloud task using an isolated child process or direct API.
+        """
         start_time = time.time()
         
-        # Determine worker script path
-        # In Step 4, we only have google/gemini implemented
-        if task.provider != "google":
-            logger.error(f"Provider {task.provider} not supported in CloudManager.")
-            # ... (error result logic)
-            return
+        # 1. Wait for a pacing slot (centralized for Google)
+        if task.provider == "google":
+            logger.info(f"Task {task.job_id} requesting global pacing slot...")
+            if not self.rate_limiter.wait_for_slot(timeout_seconds=300):
+                logger.error(f"Task {task.job_id} timed out waiting for rate limit slot.")
+                return 
 
+        # 2. Worker setup
         worker_script = self.aria_root / "aria_node_controller" / "backends" / "cloud" / "gemini_worker.py"
-        
-        # Select best python for cloud worker
-        # On Windows (PC 139), we want the isolated aria-cloud env if it exists
-        worker_python = sys.executable
-        win_cloud_env = self.aria_root / "envs" / "aria-cloud" / "python.exe"
-        if os.name == "nt" and win_cloud_env.exists():
-            worker_python = str(win_cloud_env)
-            logger.info(f"Using isolated cloud environment: {worker_python}")
-        
+        if not worker_script.exists():
+             logger.error(f"Cloud worker script not found at {worker_script}")
+             # We should report error back to redis
+             return
+
         try:
-            logger.info(f"Spawning worker process for task {task.job_id}...")
+            worker_python = self.cloud_env
             
-            # Formulate payload for the worker
-            worker_payload = task.payload.copy()
-            worker_payload["job_id"] = task.job_id
-            worker_payload["client_id"] = task.client_id
-            worker_payload["model_id"] = task.model_id
+            # Prepare task JSON for the worker
+            worker_payload = {
+                **task.payload,
+                "job_id": task.job_id,
+                "client_id": task.client_id,
+                "model_id": task.model_id
+            }
+            payload_json = json.dumps(worker_payload)
             
             # Execute worker sequentially (blocking)
+            logger.info(f"Spawning worker process for task {task.job_id}...")
             result_process = subprocess.run(
-                [worker_python, str(worker_script), json.dumps(worker_payload)],
+                [worker_python, str(worker_script)],
+                input=payload_json,
                 capture_output=True,
                 text=True,
                 check=False
@@ -135,7 +133,7 @@ class CloudManager:
             try:
                 worker_result = json.loads(result_process.stdout)
             except json.JSONDecodeError:
-                raise RuntimeError(f"Invalid JSON from worker: {result_process.stdout[:100]}...")
+                raise RuntimeError(f"Invalid JSON from worker: {result_process.stdout[:200]}...")
 
             if worker_result.get("status") == "success":
                 result = AriaTaskResult(
@@ -146,10 +144,13 @@ class CloudManager:
                     model_id=task.model_id,
                     status="done",
                     processing_time_seconds=time.time() - start_time,
-                    output=worker_result.get("output")
+                    output=worker_result.get("output", {}),
+                    usage=worker_result.get("usage", {})
                 )
+                if task.provider == "google":
+                    self.rate_limiter.report_success()
             else:
-                raise RuntimeError(worker_result.get("error", "Unknown worker error"))
+                raise RuntimeError(f"Worker reported error: {worker_result.get('error')}")
 
         except Exception as e:
             logger.error(f"Cloud task {task.job_id} failed: {e}")
@@ -159,6 +160,8 @@ class CloudManager:
             
             if "QUOTA_EXHAUSTED" in error_msg or "429" in error_msg:
                 error_code = "QUOTA_EXHAUSTED"
+                if task.provider == "google":
+                    self.rate_limiter.report_429()
             
             result = AriaTaskResult(
                 job_id=task.job_id,
@@ -172,6 +175,6 @@ class CloudManager:
                 error_code=error_code
             )
 
-        # Post result and clear lock
+        # Post result
         self.qm.post_result(task, result)
         logger.info(f"Cloud task {task.job_id} completed with status: {result.status}")

@@ -1,0 +1,11 @@
+{
+  "node_id": "GPU-NODE-01",
+  "redis_host": "127.0.0.1",
+  "redis_port": 6379,
+  "local_ip": "127.0.0.1",
+  "auto_backends": true,
+  "max_vram_usage_gb": 15.0,
+  "idle_timeout_s": 2700,
+  "http_port": 8082,
+  "google_api_key": "YOUR_GOOGLE_API_KEY_HERE"
+}

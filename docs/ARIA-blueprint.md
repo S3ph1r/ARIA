@@ -145,13 +145,17 @@ ARIA NODE CONTROLLER (Windows — Nodo GPU — %ARIA_ROOT%)
 │   ├── qwen3_server.py                # Server FastAPI Qwen3-TTS (porta 8083)
 │   ├── core/
 │   │   ├── orchestrator.py            # Loop principale, dispatch task, process manager
+│   │   ├── cloud_manager.py           # Gestore sequenziale task Cloud (Gemini) [v2.0]
+│   │   ├── rate_limiter.py            # Centralized Gemini Quota & Pacing [v2.0]
 │   │   ├── queue_manager.py           # BRPOP da Redis, routing code
 │   │   ├── batch_optimizer.py         # Decide quale modello caricare
 │   │   ├── models.py                  # Pydantic models (AriaTaskResult, ecc.)
 │   │   ├── config_manager.py          # Lettura node_settings.json
 │   │   └── logger.py                  # Structured logging
 │   └── backends/
-│       └── qwen3_tts.py               # Backend HTTP per Qwen3-TTS
+│       ├── qwen3_tts.py               # Backend HTTP per Qwen3-TTS
+│       └── cloud/                     # Backends per modelli remoti [NEW]
+│           └── gemini_worker.py       # Worker isolato per Google GenAI
 ├── envs/                              # Ambienti Python isolati (project-local)
 │   ├── qwen3tts/                      # Python 3.12 + PyTorch + qwen-tts
 │   └── fish-speech/                   # Repo Fish + (futuro) env Python 3.10
@@ -180,20 +184,24 @@ vive su Redis.
 Il loop principale:
 
 ```
-loop:
-  1. Leggi stato semaforo → se RED: attendi, non consumare task
-  2. Chiedi a BatchOptimizer: quale modello caricare?
-  3. Se modello diverso da quello in VRAM: unload → load nuovo
-  4. Consuma task dalla coda del modello scelto (BRPOP)
-  5. Sposta task in gpu:processing:{job_id} (visibility timeout)
-  6. **Risoluzione Intent (Aria-side)**:
-     - L'Orchestratore analizza il payload.
-     - Se presente `voice_id`, `intent_id` o `theme_id`, consulta il registro locale.
-     - Inietta i path fisici (`ref.wav`, `ref.txt`, `system_prompt`) nel payload.
-  7. Esegui inferenza con backend appropriato
-  8. Scrivi risultato in gpu:result:{client_id}:{job_id}
-  9. Elimina gpu:processing:{job_id}
-  10. Torna a 2
+    1. Leggi stato semaforo → se RED: attendi, non consumare task
+    2. Chiedi a BatchOptimizer: quale modello caricare?
+    3. Se modello "cloud-gemini":
+       a. Chiama RateLimiter.wait_for_slot() (Smart Pacing/Quota)
+       b. Esegui Task via CloudManager
+       c. Se errore 429: RateLimiter.report_429() (Global Lockout)
+    4. Se modello locale (es. `llm` via Qwen 3.5):
+       a. BatchOptimizer avvia `llama-server.exe` (se non attivo)
+       b. Consuma task dalla coda `global:queue:llm:local:{model_id}`
+    5. Se modello locale diverso da quello in VRAM: unload → load nuovo
+    6. Consuma task dalla coda del modello scelto (BRPOP)
+    7. **Risoluzione Intent (Aria-side)**:
+       - L'Orchestratore analizza il payload.
+       - Se presente `voice_id`, `intent_id` o `theme_id`, consulta il registro locale.
+       - Inietta i path fisici (`ref.wav`, `ref.txt`, `system_prompt`) nel payload.
+    8. Esegui inferenza con backend appropriato
+    9. Scrivi risultato in `global:callback:{client_id}:{job_id}` (v2.1) o `gpu:result:{client_id}:{job_id}` (legacy)
+    10. Torna a 2
 ```
 
 ### 3.2 ARIA Client
@@ -247,11 +255,12 @@ Struttura chiavi completa:
 
 ```
 # Code di input (scritte dal Client, lette dal Server)
-gpu:queue:{model_type}:{model_id}     # Lista FIFO, LPUSH/BRPOP
-  es: gpu:queue:tts:orpheus-3b
-  es: gpu:queue:music:musicgen-small
-  es: gpu:queue:llm:llama-3.1-8b
-  es: gpu:queue:image:flux-dev
+# Pattern Locale: gpu:queue:{model_type}:{model_id}
+gpu:queue:tts:orpheus-3b
+gpu:queue:music:musicgen-small
+
+# Pattern Cloud Gateway (v2.0): global:queue:cloud:{provider}:{model_id}:{client_id}
+global:queue:cloud:google:gemini-flash-lite-latest:dias
 
 # Task in esecuzione (visibility timeout, prevenzione perdita su crash)
 gpu:processing:{job_id}               # Hash, TTL = timeout_seconds task
@@ -313,18 +322,11 @@ class BaseBackend(ABC):
 | model_type | model_id (esempi) | VRAM est. | Framework | Output |
 |---|---|---|---|---|
 | `tts` | `fish-s1-mini` | 4GB | fish-speech (nativo) | WAV mono 44.1kHz |
-| `tts` | `orpheus-3b` | 7GB | transformers | WAV mono 48kHz |
-| `tts` | `kokoro-v1` | 2GB | transformers | WAV mono 24kHz |
-| `tts` | `f5-tts` | 4GB | transformers | WAV mono 24kHz |
-| `music` | `musicgen-small` | 4GB | audiocraft | WAV stereo 48kHz |
-| `music` | `musicgen-medium` | 8GB | audiocraft | WAV stereo 48kHz |
-| `llm` | `llama-3.1-8b` | 6GB (q4) | transformers | text |
-| `llm` | `qwen2.5-7b` | 5GB (q4) | transformers | text |
-| `llm` | `mistral-7b` | 5GB (q4) | transformers | text |
-| `image` | `sdxl-base` | 7GB | diffusers | PNG/JPEG |
-| `image` | `flux-dev` | 12GB | diffusers | PNG/JPEG |
+| `tts` | `qwen3-tts-1.7b` | 5GB | transformers (nativo) | WAV mono 24kHz |
+| `tts` | `qwen3-tts-custom` | 6GB | transformers (nativo) | WAV mono 24kHz |
+| `llm` | `qwen3.5-35b-moe-q3ks` | 13GB (q3) | llama-server.exe | text (thinking) |
+| `llm` | `gemini-flash-lite` | Cloud | Google Gateway | text |
 | `vision` | `qwen-vl-7b` | 8GB | transformers | text |
-| `vision` | `internvl2-8b` | 9GB | transformers | text |
 | `stt` | `whisper-large-v3` | 3GB | faster-whisper | text + timestamps |
 
 ### Nota su VRAM e coesistenza

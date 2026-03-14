@@ -92,31 +92,21 @@ C:\Users\%USERNAME%\
     │   └── backends\qwen3_tts.py        # Backend HTTP Qwen3
     │
     ├── envs\                            ← Ambienti Python isolati (Livello 1)
-    │   ├── qwen3tts\                    ← Creato con: conda create --prefix ... python=3.12
-    │   │   ├── python.exe               # IL suo Python 3.12
-    │   │   ├── Lib\site-packages\
-    │   │   │   ├── torch\               # IL suo PyTorch (2.6+cu124)
-    │   │   │   ├── qwen_tts\            # Qwen-TTS
-    │   │   │   ├── transformers\
-    │   │   │   └── fastapi\
-    │   │   └── Scripts\
-    │   │
-    │   ├── fish-speech\                 ← Clone del REPO (codice sorgente Fish)
-    │   │   ├── tools\api_server.py      # Server Fish TTS
-    │   │   ├── voice_cloning_server.py  # Server Voice Cloning
-    │   │   └── ...
-    │   │
-    │   └── fish-speech-env\             ← DA CREARE — Ambiente Python Fish
-    │       ├── python.exe               # Python 3.10
-    │       └── Lib\site-packages\
-    │           ├── torch\               # PyTorch 2.7+cu128
-    │           ├── fish_speech\
-    │           └── torchcodec\
+    ### 1.1 Conda Environments (Worker Node)
+
+| Nome Ambiente | Scopo | Installazione |
+|---|---|---|
+| `fish-speech-env` | TTS Fish S1-mini | Basato su `torch 2.7+cu128` |
+| `nh-qwen35-llm` | LLM locale Qwen 3.5 | `pip install llama-cpp-python` (CUDA) |
+| `aria-cloud` | Gateway Cloud Gemini | `pip install google-generativeai` |
+| `qwen3tts` | TTS Qwen3-Audio | Ambiente isolato per Transformers |
+    │   └── sox\                         ← Utilità audio per i backend TTS
     │
     ├── data\
     │   ├── models\
     │   │   ├── fish-s1-mini\            ← Pesi modello Fish (~1.5GB)
-    │   │   └── qwen3-tts-1.7b\         ← Pesi modello Qwen3 (~3.8GB)
+    │   │   ├── qwen3-tts-1.7b\         ← Pesi modello Qwen3 (~3.8GB)
+    │   │   └── qwen3-tts-1.7b-customvoice ← Pesi modello Qwen3 Custom
     │   ├── voices\
     │   │   ├── angelo\                  ← ref.wav + ref_padded.wav + ref.txt
     │   │   └── luca\

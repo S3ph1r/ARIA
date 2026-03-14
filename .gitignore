@@ -1,9 +1,12 @@
-# Python
+# ARIA - Git Ignore
+
+# Python 
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -20,40 +23,39 @@ wheels/
 .installed.cfg
 *.egg
 
-# Environment
-.env
-.venv
-env/
+# Virtual Environments & Conda
+envs/
 venv/
-ENV/
-env.bak/
-venv.bak/
+.venv/
+conda-bld/
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# ARIA Specific Assets (Modelli e Voci pesanti)
+data/models/*/
+data/voices/*/
+data/outputs/*/
+data/models/*.bin
+data/models/*.pth
+data/models/*.onnx
+data/voices/**/*.wav
+data/voices/**/*.mp3
+data/voices/**/*.ref
+!data/voices/.gitkeep
+!data/models/.gitkeep
+!data/outputs/.gitkeep
 
-# Logs
+# Local Configurations (SENSITIVE / MACHINE SPECIFIC)
+node_settings.json
+.env
+
+# Logs and Archives
 logs/
+archive/
 *.log
 
-# Models (local development)
-models/
-*.bin
-*.safetensors
-*.gguf
-
-# OS
+# OS Specific
 .DS_Store
 Thumbs.db
 
-# Docker
-.dockerignore
-
-# Runtime
-temp/
-tmp/
-envs/
+# Project generated results
+comparison_results/
+final_comparison_report.json
