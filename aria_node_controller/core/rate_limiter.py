@@ -25,66 +25,144 @@ class GeminiRateLimiter:
     def __init__(
         self, 
         redis_client: redis.Redis,
-        min_delay_seconds: int = 30,
-        max_daily_requests: int = 1500
+        min_delay_seconds: int = 30, 
+        lockout_minutes: int = 10, 
+        daily_limit: int = 20
     ):
-        self.r = redis_client
-        self.min_delay = min_delay_seconds
-        self.max_daily = max_daily_requests
-        
-        # Load Lua script for atomic pacing
-        self._pacing_script = self.r.register_script("""
-            local last_call_key = KEYS[1]
-            local lockout_until_key = KEYS[2]
-            local min_delay = tonumber(ARGV[1])
-            local now = tonumber(ARGV[2])
-            
-            -- Check for global lockout
-            local lockout_until = tonumber(redis.call('GET', lockout_until_key) or 0)
-            if now < lockout_until then
-                return "LOCKOUT:" .. tostring(lockout_until - now)
-            end
-            
-            -- Check for pacing
-            local last_call = tonumber(redis.call('GET', last_call_key) or 0)
-            local diff = now - last_call
-            
-            if diff < min_delay then
-                return tostring(math.floor((min_delay - diff) * 1000)) -- Return ms to wait
-            end
-            
-            -- Success: update last call
-            redis.call('SET', last_call_key, now)
-            return "OK"
-        """)
+        self.redis = redis_client
+        self.min_delay = timedelta(seconds=min_delay_seconds)
+        self.lockout_duration = timedelta(minutes=lockout_minutes)
+        self.daily_limit = daily_limit
 
-    def wait_for_slot(self, timeout_seconds: int = 600) -> bool:
+
+    def _get_datetime_from_redis(self, key: str) -> Optional[datetime]:
+        try:
+            val = self.redis.get(key)
+            if val:
+                # Handle both bytes and str
+                if isinstance(val, bytes):
+                    val = val.decode('utf-8')
+                return datetime.fromisoformat(val)
+        except Exception as e:
+            logger.error(f"Error reading {key} from Redis: {e}")
+        return None
+
+    def _get_daily_key(self) -> str:
+        return f"{DAILY_COUNT_KEY_PREFIX}{datetime.now().strftime('%Y-%m-%d')}"
+
+    def get_daily_count(self) -> int:
+        key = self._get_daily_key()
+        try:
+            val = self.redis.get(key)
+            return int(val) if val else 0
+        except Exception as e:
+            logger.error(f"Error reading daily count: {e}")
+            return 0
+
+    def increment_daily_count(self) -> int:
+        # NOTE: This is now mostly handled by the Lua script in wait_for_slot for atomicity,
+        # but kept here for manual use or auxiliary incrementing.
+        key = self._get_daily_key()
+        try:
+            count = self.redis.incr(key)
+            if count == 1:
+                self.redis.expire(key, 90000) # ~25 hours
+            return count
+        except Exception as e:
+            logger.error(f"Error incrementing daily count: {e}")
+            return 0
+
+    def report_429(self):
+        """Signals a 429 error and activates a global lockout."""
+        lockout_until = datetime.now() + self.lockout_duration
+        try:
+            self.redis.set(LOCKOUT_KEY, lockout_until.isoformat())
+            self.redis.expire(LOCKOUT_KEY, int(self.lockout_duration.total_seconds()))
+            logger.warning(f"⚠️ GLOBAL Lockout activated until {lockout_until.isoformat()}")
+        except Exception as e:
+            logger.error(f"Failed to set global lockout: {e}")
+
+    def wait_for_slot(self) -> float:
         """
-        Blocks until a rate-limit slot is available or timeout.
+        Wait until a slot is available GLOBALLY.
+        Returns total seconds waited.
         """
-        start_time = time.time()
-        total_wait_time = 0
+        total_wait_time = 0.0
         
-        while (time.time() - start_time) < timeout_seconds:
+        # IMPROVED Lua script: Atomic pacing + quota check
+        lua_script = """
+        local last_call_ms = tonumber(redis.call('hget', ARGV[3], 'last_call_ms') or 0)
+        local lockout_until = redis.call('get', KEYS[1])
+        local daily_count = tonumber(redis.call('get', ARGV[5]) or 0)
+        local daily_limit = tonumber(ARGV[6])
+        
+        local time_res = redis.call('time')
+        local now_ms = (tonumber(time_res[1]) * 1000) + math.floor(tonumber(time_res[2]) / 1000)
+        
+        if lockout_until then return -1 end
+        if daily_count >= daily_limit then return -2 end
+        
+        local min_delay = tonumber(ARGV[1])
+        local diff = now_ms - last_call_ms
+        
+        if diff < min_delay then
+            return min_delay - diff
+        end
+        
+        -- Claim slot and increment quota ATOMICALLY
+        redis.call('hset', ARGV[3], 'last_call_ms', now_ms)
+        redis.call('set', ARGV[2], ARGV[4])
+        redis.call('incr', ARGV[5])
+        
+        -- Success
+        return 0
+        """
+        
+        while True:
+            now_iso = datetime.now().isoformat()
+            min_delay_ms = int(self.min_delay.total_seconds() * 1000)
+            daily_key = self._get_daily_key()
+            
             try:
-                now = time.time()
-                res = self._pacing_script(keys=[LAST_CALL_KEY, LOCKOUT_KEY], args=[self.min_delay, now])
+                # res will be: 0 (success), -1 (lockout), -2 (quota hit), or > 0 (wait ms)
+                res = self.redis.eval(
+                    lua_script, 1, 
+                    LOCKOUT_KEY,             # KEYS[1]
+                    min_delay_ms,            # ARGV[1]
+                    INTERNAL_STATE_KEY,      # ARGV[2]
+                    LAST_CALL_KEY,           # ARGV[3]
+                    now_iso,                 # ARGV[4]
+                    daily_key,               # ARGV[5]
+                    self.daily_limit         # ARGV[6]
+                )
                 
-                if res == b"OK":
+                if res == 0:
+                    # Success: slot obtained and quota incremented in Lua
                     if total_wait_time > 0:
-                        logger.info(f"Slot acquired after {total_wait_time:.1f}s.")
-                    return True
+                        logger.info(f"Slot secured after {total_wait_time:.2f}s delay.")
+                    return total_wait_time
                 
-                res = res.decode('utf-8')
-                if res.startswith("LOCKOUT:"):
-                    wait = float(res.split(":")[1])
-                    if wait > 0:
-                        logger.warning(f"GLOBAL 429 Lockout active. Waiting {wait:.1f}s...")
-                        time.sleep(min(wait, 5.0)) # Don't sleep too long to allow orchestration checks
-                        total_wait_time += min(wait, 5.0)
+                elif res == -1:
+                    lockout_until = self._get_datetime_from_redis(LOCKOUT_KEY)
+                    if lockout_until:
+                        wait = (lockout_until - datetime.now()).total_seconds()
+                        if wait > 0:
+                            logger.warning(f"🚫 GLOBAL Lockout active. Waiting {wait:.1f}s...")
+                            time.sleep(wait)
+                            total_wait_time += wait
+                        else:
+                            time.sleep(1)
+                            total_wait_time += 1
                     else:
                         time.sleep(1)
                         total_wait_time += 1
+                
+                elif res == -2:
+                    logger.error(f"🚨 PREVENTIVE QUOTA PROTECTION: Daily limit reached ({self.daily_limit}).")
+                    # Activate lockout to prevent further attempts from other workers
+                    self.report_429()
+                    # Raising RuntimeError to stop CloudManager execution for this task
+                    raise RuntimeError("PREVENTIVE_QUOTA_EXHAUSTED")
                 
                 else:
                     # Specific delay requested by Lua (ms)
@@ -94,21 +172,9 @@ class GeminiRateLimiter:
                     total_wait_time += wait
                     
             except Exception as e:
+                # Re-raise our specific error to propagate up to CloudManager
+                if "PREVENTIVE_QUOTA_EXHAUSTED" in str(e):
+                    raise
                 logger.error(f"Error in wait_for_slot: {e}")
                 time.sleep(1)
                 total_wait_time += 1
-                
-        return False
-
-    def report_success(self):
-        """Called by worker to increment daily count if needed."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        key = f"{DAILY_COUNT_KEY_PREFIX}{today}"
-        self.r.incr(key)
-        self.r.expire(key, 86400 * 2) # Keep for 2 days
-
-    def report_429(self, retry_after_seconds: int = 60):
-        """Handles Quota Exhausted by setting a global lockout."""
-        until = time.time() + retry_after_seconds
-        self.r.set(LOCKOUT_KEY, until)
-        logger.error(f"Quota Exhausted (429). Setting Global Lockout for {retry_after_seconds}s.")
