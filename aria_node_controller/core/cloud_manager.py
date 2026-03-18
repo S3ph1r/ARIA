@@ -89,21 +89,17 @@ class CloudManager:
         """
         start_time = time.time()
         
-        # 1. Wait for a pacing slot (centralized for Google)
-        if task.provider == "google":
-            logger.info(f"Task {task.job_id} requesting global pacing slot...")
-            if not self.rate_limiter.wait_for_slot(timeout_seconds=300):
-                logger.error(f"Task {task.job_id} timed out waiting for rate limit slot.")
-                return 
-
-        # 2. Worker setup
-        worker_script = self.aria_root / "aria_node_controller" / "backends" / "cloud" / "gemini_worker.py"
-        if not worker_script.exists():
-             logger.error(f"Cloud worker script not found at {worker_script}")
-             # We should report error back to redis
-             return
-
         try:
+            # 1. Wait for a pacing slot (centralized for Google)
+            if task.provider == "google":
+                logger.info(f"Task {task.job_id} requesting global pacing slot...")
+                self.rate_limiter.wait_for_slot(timeout_seconds=300)
+
+            # 2. Worker setup
+            worker_script = self.aria_root / "aria_node_controller" / "backends" / "cloud" / "gemini_worker.py"
+            if not worker_script.exists():
+                 raise RuntimeError(f"Cloud worker script not found at {worker_script}")
+
             worker_python = self.cloud_env
             
             # Prepare task JSON for the worker
