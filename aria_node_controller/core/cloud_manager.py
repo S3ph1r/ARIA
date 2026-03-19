@@ -93,7 +93,7 @@ class CloudManager:
             # 1. Wait for a pacing slot (centralized for Google)
             if task.provider == "google":
                 logger.info(f"Task {task.job_id} requesting global pacing slot...")
-                self.rate_limiter.wait_for_slot(timeout_seconds=300)
+                self.rate_limiter.wait_for_slot()
 
             # 2. Worker setup
             worker_script = self.aria_root / "aria_node_controller" / "backends" / "cloud" / "gemini_worker.py"
