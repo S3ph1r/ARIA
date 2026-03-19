@@ -102,6 +102,13 @@ class CloudManager:
 
             worker_python = self.cloud_env
             
+            # Pass environment variables to the isolated subprocess
+            worker_env = os.environ.copy()
+            if "GOOGLE_API_KEY" not in worker_env:
+                from dotenv import load_dotenv
+                load_dotenv()
+                worker_env["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
+            
             # Prepare task JSON for the worker
             worker_payload = {
                 **task.payload,
@@ -118,7 +125,8 @@ class CloudManager:
                 input=payload_json,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                env=worker_env
             )
             
             if result_process.returncode != 0:
