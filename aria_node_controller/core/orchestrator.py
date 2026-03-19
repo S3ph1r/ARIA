@@ -502,8 +502,11 @@ class NodeOrchestrator:
                     continue
 
                 # Coda ha un task — assicurati che il backend sia attivo
-                if not self.process_manager.ensure_running(next_model_id):
-                    logger.error(f"Backend {next_model_id} non disponibile, task riaccodato.")
+                # Split model_id if it's a composite logic ID (model:queue)
+                base_model_id = next_model_id.split(':')[0] if ':' in next_model_id else next_model_id
+
+                if not self.process_manager.ensure_running(base_model_id):
+                    logger.error(f"Backend {base_model_id} (from {next_model_id}) non disponibile, task riaccodato.")
                     # Re-inserisce il task in testa alla coda
                     import redis as _redis_mod
                     # Il task era già prelevato, lo re-incodiamo
