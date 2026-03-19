@@ -35,6 +35,7 @@ def main():
         model_name = task.get("model_id", "gemini-flash-lite-latest")
         temperature = task.get("config", {}).get("temperature", 0.7)
         max_tokens = task.get("config", {}).get("max_tokens", 4096)
+        response_mime_type = task.get("config", {}).get("response_mime_type")
 
         # 3. Preparazione Contenuti (unificata)
         contents = task.get("contents")
@@ -55,13 +56,18 @@ def main():
         # 4. Esecuzione Chiamata (Logica basata sull'SDK rilevato)
         if MODERN_SDK:
             client = genai.Client(api_key=api_key)
+            
+            gen_config_kwargs = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens
+            }
+            if response_mime_type:
+                gen_config_kwargs["response_mime_type"] = response_mime_type
+                
             response = client.models.generate_content(
                 model=model_name,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens
-                )
+                config=types.GenerateContentConfig(**gen_config_kwargs)
             )
             response_text = response.text
             finish_reason = str(response.candidates[0].finish_reason) if response.candidates else "unknown"
