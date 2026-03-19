@@ -1,1 +1,1 @@
-google-generativeai
+google-genai==1.65.0
