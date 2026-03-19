@@ -91,7 +91,7 @@ class GeminiRateLimiter:
         
         # IMPROVED Lua script: Atomic pacing + quota check
         lua_script = """
-        local last_call_ms = tonumber(redis.call('hget', ARGV[3], 'last_call_ms') or 0)
+        local last_call_ms = tonumber(redis.call('get', ARGV[3]) or 0)
         local lockout_until = redis.call('get', KEYS[1])
         local daily_count = tonumber(redis.call('get', ARGV[5]) or 0)
         local daily_limit = tonumber(ARGV[6])
@@ -110,7 +110,7 @@ class GeminiRateLimiter:
         end
         
         -- Claim slot and increment quota ATOMICALLY
-        redis.call('hset', ARGV[3], 'last_call_ms', now_ms)
+        redis.call('set', ARGV[3], now_ms)
         redis.call('set', ARGV[2], ARGV[4])
         redis.call('incr', ARGV[5])
         
