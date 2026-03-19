@@ -34,7 +34,7 @@ def main():
         # 2. Parametri Modello e Config
         model_name = task.get("model_id", "gemini-flash-lite-latest")
         temperature = task.get("config", {}).get("temperature", 0.7)
-        max_tokens = task.get("config", {}).get("max_tokens", 4096)
+        max_tokens = task.get("config", {}).get("max_tokens", 8192)
         response_mime_type = task.get("config", {}).get("response_mime_type")
 
         # 3. Preparazione Contenuti (unificata)
