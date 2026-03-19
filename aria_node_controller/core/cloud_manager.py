@@ -151,8 +151,6 @@ class CloudManager:
                     output=worker_result.get("output", {}),
                     usage=worker_result.get("usage", {})
                 )
-                if task.provider == "google":
-                    self.rate_limiter.report_success()
             else:
                 raise RuntimeError(f"Worker reported error: {worker_result.get('error')}")
 
