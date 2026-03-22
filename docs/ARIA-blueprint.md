@@ -138,33 +138,15 @@ CLIENT                    REDIS (Infrastructure)      ARIA WORKER (GPU Node)
 ### Componenti software
 
 ```
-ARIA NODE CONTROLLER (Windows — Nodo GPU — %ARIA_ROOT%)
-├── aria_node_controller/              # Orchestratore e logica di controllo
-│   ├── main_tray.py                   # Entry point + Tray Icon (systray semaforo)
-│   ├── settings_gui.py                # GUI impostazioni (CustomTkinter)
-│   ├── qwen3_server.py                # Server FastAPI Qwen3-TTS (porta 8083)
-│   ├── core/
-│   │   ├── orchestrator.py            # Loop principale, dispatch task, process manager
-│   │   ├── cloud_manager.py           # Gestore sequenziale task Cloud (Gemini) [v2.0]
-│   │   ├── rate_limiter.py            # Centralized Gemini Quota & Pacing [v2.0]
-│   │   ├── queue_manager.py           # BRPOP da Redis, routing code
-│   │   ├── batch_optimizer.py         # Decide quale modello caricare
-│   │   ├── models.py                  # Pydantic models (AriaTaskResult, ecc.)
-│   │   ├── config_manager.py          # Lettura node_settings.json
-│   │   └── logger.py                  # Structured logging
-│   └── backends/
-│       ├── qwen3_tts.py               # Backend HTTP per Qwen3-TTS
-│       └── cloud/                     # Backends per modelli remoti [NEW]
-│           └── gemini_worker.py       # Worker isolato per Google GenAI
-├── envs/                              # Ambienti Python isolati (project-local)
-│   ├── qwen3tts/                      # Python 3.12 + PyTorch + qwen-tts
-│   └── fish-speech/                   # Repo Fish + (futuro) env Python 3.10
-├── data/
-│   ├── models/                        # Pesi dei modelli
-│   ├── voices/                        # Voice Library
-│   └── outputs/                       # WAV generati (serviti via HTTP :8082)
-├── Avvia_Tutti_Server_ARIA.bat        # Script avvio principale
-└── node_settings.json                 # Configurazione nodo (Network role: Worker)
+L'architettura dei file di ARIA segue un modello **modulare e disaccoppiato**. Per l'elenco completo e catalogato di tutti i documenti, gli ambienti Conda e i requisiti, consultare l' [**ARIA Master Index**](ARIA-master-index.md).
+
+### 2.2 Reproducibilità e Provisioning (Strategia Bootstrap)
+
+Per garantire che ARIA sia facilmente installabile e resiliente ai reset del repository, il sistema adotta un modello **Manifest-Driven**:
+
+1.  **Dichiarazione (Manifest)**: Tutte le specifiche dei backend (porte, comandi, env) sono centralizzate nel `backends_manifest.json`.
+2.  **Automazione (Bootstrap)**: Lo script `bootstrap_aria.ps1` legge il manifest e ripristina istantaneamente gli ambienti mancanti (`envs/`).
+3.  **Portabilità**: Il codice non contiene più path assoluti; ogni risorsa è risolta rispetto alla radice del progetto tramite l'orchestratore.
 ```
 Per i dettagli sulla configurazione e l'accesso a Redis, consultare [ARIA-network-interface.md](ARIA-network-interface.md).
 
