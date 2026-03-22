@@ -239,7 +239,8 @@ def synthesize(req: TTSRequest):
     # Chunking
     chunks = chunk_text(req.text, req.max_words_per_chunk)
     logger.info(f"Sintesi {model_type} | {len(chunks)} chunk | target={target_speaker or 'cloning'}")
-    torch.cuda.reset_peak_memory_stats()
+    if DEVICE == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     wav_chunks = []
     output_sr = req.output_sample_rate

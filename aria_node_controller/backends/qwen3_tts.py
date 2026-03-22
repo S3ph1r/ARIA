@@ -173,7 +173,7 @@ class Qwen3TTSBackend:
         # Il server qwen3 serve gli output su /outputs/{filename}
         # ma il porto pubblico è l'asset server ARIA (porta 8082), che serve
         # la stessa OUTPUT_DIR. Usiamo il porto 8082 per uniformità con Fish.
-        audio_url = f"http://{local_ip}:8082/outputs/{output_filename}"
+        audio_url = f"http://{local_ip}:8082/{output_filename}"
 
         logger.info(
             f"Qwen3 completato | job={job_id} | "
