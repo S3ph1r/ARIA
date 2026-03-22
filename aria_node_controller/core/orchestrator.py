@@ -106,48 +106,60 @@ class ModelProcessManager:
         self._procs: dict[str, subprocess.Popen] = {}
         self._idle_since: dict[str, float]        = {}
         self._lock = threading.Lock()
+        
+        # Caricamento Manifest dei Backend
+        self.MODEL_CONFIGS = self._load_manifest()
+
+    def _load_manifest(self) -> dict:
+        manifest_path = self.aria_root / "aria_node_controller" / "config" / "backends_manifest.json"
+        try:
+            with open(manifest_path, "r") as f:
+                data = json.load(f)
+                logger.info(f"Manifest backend caricato correttamente da {manifest_path}")
+                return data.get("backends", {})
+        except Exception as e:
+            logger.error(f"Errore caricamento manifest {manifest_path}: {e}")
+            # Fallback a un dizionario vuoto per evitare crash
+            return {}
 
     def _build_cmd(self, model_id: str) -> list:
-        """Costruisce il comando di avvio per il modello dato."""
-        if model_id == "voice-cloning":
-            python   = str(self.aria_root / "envs" / "fish-speech-env" / "python.exe")
-            fish_dir = self.aria_root / "envs" / "fish-speech"
-            return [python, str(fish_dir / "voice_cloning_server.py")]
-        elif model_id == "fish-s1-mini":
+        """Costruisce il comando di avvio per il modello dato basandosi sul Manifest."""
+        cfg = self.MODEL_CONFIGS.get(model_id)
+        if not cfg:
+            raise ValueError(f"Nessuna configurazione trovata nel manifest per model_id='{model_id}'")
 
-            python = str(self.aria_root / "envs" / "fish-speech-env" / "python.exe")
-            fish_dir  = self.aria_root / "envs" / "fish-speech"
-            model_dir = self.aria_root / "data" / "models" / "fish-s1-mini"
-            return [
-                python,
-                str(fish_dir / "tools" / "api_server.py"),
-                "--listen", "0.0.0.0:8080",
-                "--llama-checkpoint-path",   str(model_dir),
-                "--decoder-checkpoint-path", str(model_dir / "codec.pth"),
-                "--decoder-config-name",     "modded_dac_vq",
-            ]
-        elif model_id in ["qwen3-tts-1.7b", "qwen3-tts-custom"]:
-            python = str(self.aria_root / "envs" / "qwen3tts" / "python.exe")
-            server = self.aria_root / "aria_node_controller" / "qwen3_server.py"
-            
-            # Determina il path del modello
-            model_sub = "qwen3-tts-1.7b" if model_id == "qwen3-tts-1.7b" else "qwen3-tts-1.7b-customvoice"
-            model_path = str(self.aria_root / "data" / "models" / model_sub)
-            
-            port = self.MODEL_CONFIGS[model_id]["port"]
-            
-            return [
-                python, 
-                str(server),
-                "--model-path", model_path,
-                "--port", str(port)
-            ]
-        elif model_id == "qwen3.5-35b-moe-q3ks":
-            python = str(self.aria_root / "envs" / "nh-qwen35-llm" / "python.exe")
-            server = self.aria_root / "aria_node_controller" / "llm_server.py"
-            return [python, str(server)]
+        # 1. Risoluzione Python Executable
+        env_prefix = cfg.get("env_prefix")
+        if not env_prefix:
+            # Se non c'è env_prefix, usa il python della base (poco probabile per AI backends)
+            python = "python"
         else:
-            raise ValueError(f"Nessuna configurazione per model_id='{model_id}'")
+            python_path = self.aria_root / env_prefix / "python.exe"
+            if not python_path.exists() and os.name != 'nt':
+                 # Su Linux il binario è 'python' o 'python3' dentro bin/
+                 python_path = self.aria_root / env_prefix / "bin" / "python"
+            python = str(python_path)
+
+        # 2. Risoluzione Script principale
+        script_rel = cfg.get("script")
+        if not script_rel:
+            raise ValueError(f"Script non definito per backend '{model_id}' nel manifest.")
+        script_abs = str(self.aria_root / script_rel)
+
+        # 3. Costruzione comando base
+        cmd = [python, script_abs]
+
+        # 4. Aggiunta Argomenti (con risoluzione macro per path se necessario)
+        args_raw = cfg.get("args", [])
+        for arg in args_raw:
+            # Se l'argomento sembra un path relativo ad ARIA, lo risolviamo
+            # Cerchiamo pattern che iniziano con cartelle note
+            if arg.startswith(("data/", "aria_node_controller/", "envs/")):
+                cmd.append(str(self.aria_root / arg))
+            else:
+                cmd.append(arg)
+
+        return cmd
 
     def _health_check(self, model_id: str) -> bool:
         url = self.MODEL_CONFIGS[model_id]["health_url"]

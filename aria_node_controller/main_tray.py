@@ -137,42 +137,32 @@ def setup(icon):
     # Init redis at startup
     init_redis()
     
-    # Avvio dei Backend Locali (Fish Speech) in modalità "Silent", a meno che non sia specificato --no-backends
-    if "--no-backends" not in sys.argv:
-        print("Avvio dei server AI Backend in background...")
-        CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-        
-        # Fish TTS (8080)
-        try:
-            fish_tts_proc = subprocess.Popen(
-                [r"C:\Users\Roberto\aria\envs\fish-speech-env\python.exe", "tools\\api_server.py", "--listen", "0.0.0.0:8080", "--compile", "--llama-checkpoint-path", r"C:\Users\Roberto\aria\data\models\fish-s1-mini", "--decoder-checkpoint-path", r"C:\Users\Roberto\aria\data\models\fish-s1-mini\codec.pth", "--decoder-config-name", "modded_dac_vq"],
-                cwd=r"C:\Users\Roberto\aria\envs\fish-speech",
-                creationflags=CREATE_NO_WINDOW
-            )
-            print(" -> Avviato Fish TTS Server (Porta 8080)")
-        except Exception as e:
-            print(f"Errore lancio TTS Server: {e}")
-
-        # Fish Voice Cloning VQGAN (8081)
-        try:
-            fish_vqgan_proc = subprocess.Popen(
-                [r"C:\Users\Roberto\aria\envs\fish-speech-env\python.exe", "voice_cloning_server.py"],
-                cwd=r"C:\Users\Roberto\aria\envs\fish-speech",
-                creationflags=CREATE_NO_WINDOW
-            )
-            print(" -> Avviato Fish Voice Cloning Server (Porta 8081)")
-        except Exception as e:
-            print(f"Errore lancio Voice Cloning Server: {e}")
-    else:
-        print("Flag --no-backends rilevato. I server AI (8080/8081) devono essere avviati esternamente.")
-    
-    # Avvia l'orchestratore in background
+    # 1. Init Orchestrator
     if redis_client:
         orchestrator = NodeOrchestrator(redis_client)
         orchestrator.set_semaphore(SEMAPHORE_GREEN)
         orchestrator.start()
     else:
         print("Redis non disponibile all'avvio: Orchestrator non avviato.")
+        return
+
+    # 2. Avvio dei Backend Locali (Fish Speech) via Orchestratore
+    if "--no-backends" not in sys.argv:
+        print("Avvio dei server AI Backend via Orchestratore...")
+        
+        # Fish TTS (8080)
+        if orchestrator.ensure_running("fish-s1-mini"):
+            print(" -> Fish TTS Server pronto (Porta 8080)")
+        else:
+            print(" -> [ERRORE] Impossibile avviare Fish TTS")
+
+        # Fish Voice Cloning VQGAN (8081) - Già gestito come companion o avviabile esplicitamente
+        if orchestrator.ensure_running("voice-cloning"):
+            print(" -> Fish Voice Cloning Server pronto (Porta 8081)")
+        else:
+            print(" -> [ERRORE] Impossibile avviare Voice Cloning")
+    else:
+        print("Flag --no-backends rilevato. I server AI devono essere avviati esternamente o JIT.")
     
     # Correct the initial icon based on redis state
     color = "green" if SEMAPHORE_GREEN else "red"

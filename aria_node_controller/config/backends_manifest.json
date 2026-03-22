@@ -1,0 +1,51 @@
+{
+  "backends": {
+    "fish-s1-mini": {
+      "port": 8080,
+      "health_url": "http://localhost:8080/v1/health",
+      "startup_wait": 90,
+      "env_prefix": "envs/fish-speech-env",
+      "template": "envs/templates/fish-speech.yml",
+      "working_dir": "envs/fish-speech",
+      "script": "tools/api_server.py",
+      "args": [
+        "--listen", "0.0.0.0:8080",
+        "--llama-checkpoint-path", "data/models/fish-s1-mini",
+        "--decoder-checkpoint-path", "data/models/fish-s1-mini/codec.pth",
+        "--decoder-config-name", "modded_dac_vq"
+      ],
+      "companion": "voice-cloning"
+    },
+    "voice-cloning": {
+      "port": 8081,
+      "health_url": "http://localhost:8081/health",
+      "startup_wait": 60,
+      "env_prefix": "envs/fish-speech-env",
+      "working_dir": "envs/fish-speech",
+      "script": "voice_cloning_server.py"
+    },
+    "qwen3-tts-1.7b": {
+      "port": 8083,
+      "health_url": "http://localhost:8083/health",
+      "startup_wait": 240,
+      "env_prefix": "envs/qwen3tts",
+      "template": "envs/templates/qwen3-tts.yml",
+      "script": "aria_node_controller/qwen3_server.py",
+      "args": [
+        "--model-path", "data/models/qwen3-tts-1.7b",
+        "--port", "8083"
+      ]
+    },
+    "qwen3.5-35b-moe-q3ks": {
+      "port": 8085,
+      "health_url": "http://localhost:8085/v1/health",
+      "startup_wait": 300,
+      "env_prefix": "envs/nh-qwen35-llm",
+      "script": "aria_node_controller/llm_server.py"
+    },
+    "sox": {
+      "env_prefix": "envs/sox",
+      "conda_pkg": "sox -c conda-forge"
+    }
+  }
+}
