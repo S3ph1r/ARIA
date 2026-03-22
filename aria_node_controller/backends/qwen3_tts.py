@@ -131,7 +131,7 @@ class Qwen3TTSBackend:
         request_body = {
             "text":                   text,
             "voice_id":               voice_id,
-            "voice_ref_audio_path":   voice_ref_path_str,
+            "voice_ref_audio_path":   voice_ref_path_str or "",
             "voice_ref_text":         payload.get("voice_ref_text"),
             "language":               payload.get("language", "Italian"),
             "instruct":               instruct,
