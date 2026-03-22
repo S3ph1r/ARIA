@@ -210,11 +210,10 @@ class ModelProcessManager:
                 logger.info(f"Avvio backend {model_id} in finestra Console dedicata...")
                 
                 if os.name == 'nt':
-                    # Su Windows avvia una Command Window separata e la tiene aperta (cmd /k)
-                    # Convertiamo cmd in una stringa stando attenti agli spazi.
-                    # Il "Magic CMD escape bug" su Windows richiede che l'intera stringa successiva a /k
-                    # venga wrappata in quote esterne se i parametri interni hanno stringhe.
-                    cmd_str = " ".join(f'"{c}"' for c in cmd)
+                    # Magic CMD escape bug: Se usiamo 'start' con 'cmd /k', dobbiamo stare attenti a come passiamo la stringa.
+                    # Il modo più sicuro è NON quotare l'intera cmd_str se i singoli pezzi sono già quotati, 
+                    # oppure usare un trucco specifico di CMD se ci sono spazi.
+                    cmd_str = " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
                     title = f"ARIA Backend: {model_id}"
                     
                     # Iniezione PATH per SoX e altre dipendenze core
@@ -224,8 +223,12 @@ class ModelProcessManager:
                         env["PATH"] = sox_path + os.pathsep + env.get("PATH", "")
                         logger.info(f"Injected SoX path: {sox_path}")
 
+                    # Su Windows, Popen con shell=True e 'start' vuole una stringa dove:
+                    # 1. 'start' vuole il titolo tra virgolette
+                    # 2. 'cmd /k' vuole il comando. Se il comando ha spazi/quote, meglio non wrapparlo 
+                    #    ulteriormente se i singoli pezzi sono già corretti.
                     new_proc = subprocess.Popen(
-                        f'start "{title}" cmd.exe /k "{cmd_str}"',
+                        f'start "{title}" cmd.exe /k {cmd_str}',
                         shell=True,
                         cwd=str(self.aria_root),
                         env=env
