@@ -52,11 +52,15 @@ ARIA/
 
 ## 📖 Documentation
 
-Detailed technical documentation can be found in the `docs/` directory:
-- [ARIA Blueprint](docs/ARIA-blueprint.md)
-- [Network Interface Spec](docs/ARIA-network-interface.md)
-- [LLM Backend Details](docs/llm-backend.md)
-- [Environment Setup](docs/environments-setup.md)
+Per orientarsi nell'architettura di ARIA, consulta il **Documento Master** che funge da bussola per tutto il progetto:
+
+👉 [**ARIA Master Index**](docs/ARIA-master-index.md)
+
+Dal Master Index potrai accedere a:
+- [**ARIA API Contract**](docs/ARIA-API-Contract.md) (Source of Truth per Redis e Task)
+- [**ARIA Blueprint**](docs/ARIA-blueprint.md) (Visione e Design di sistema)
+- [**Environment Setup**](docs/environments-setup.md) (Guida agli ambienti Conda)
+- [**Backend Details**](docs/qwen3-tts-backend.md) (Deep dive sui singoli modelli)
 
 ---
 *Created by S3ph1r as part of the NH-Mini development framework.*

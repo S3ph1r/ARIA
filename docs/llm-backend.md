@@ -11,7 +11,7 @@ Il modello di riferimento attuale per l'inferenza locale è **Qwen2.5-35B-Instru
 ### Architettura Standalone
 - **Engine**: `llama-server.exe` (OpenAI API Compatible).
 - **Integrazione**: ARIA gestisce il ciclo di vita del server sulla porta `1234`.
-- **Coda Redis**: `global:queue:llm:local:qwen3.5-35b-moe-q3ks:{client_id}`
+- **Coda Redis**: `aria:q:local:llm:qwen3.5-35b-moe-q3ks:dias`
 
 ### Dettagli del Payload
 Il backend supporta messaggi strutturati e il controllo del budget di "pensiero":
@@ -37,7 +37,7 @@ Qwen 3.5 supporta il ragionamento interno. ARIA estrae automaticamente il conten
 Gestito tramite il `CloudManager` e il `GeminiRateLimiter` per garantire l'aderenza alle quote API.
 
 - **Modello**: `gemini-flash-lite-latest`
-- **Coda**: `global:queue:cloud:google:gemini-flash-lite-latest:{client_id}`
+- **Coda**: `aria:q:cloud:google:gemini-1.5-flash-lite:dias`
 - **Pacing**: Minimo 30s tra i task (configurabile in `GeminiRateLimiter`).
 - **Quota Management**: In caso di errore 429, ARIA entra in modalit "Lockout" globale finch la quota non viene ripristinata.
 
@@ -63,4 +63,4 @@ L'Orchestratore avvia il backend con:
 ### Qwen3-TTS (Audio)
 Mentre Qwen 3.5 MoE gestisce il testo, il modello **Qwen3-TTS 1.7B** gestisce la narrazione vocale basata su istruzioni (Instruct-TTS).
 - **Doc**: [qwen3-tts-backend.md](qwen3-tts-backend.md)
-- **Coda**: `global:queue:tts:local:qwen3-tts-1.7b:{client_id}`
+- **Coda**: `aria:q:local:tts:qwen3-tts-1.7b:dias`

@@ -15,9 +15,9 @@ class BatchOptimizer:
     def build_queue_key(model_type: str, model_id: str, provider: str = "local", client_id: str = "*") -> str:
         """
         Creates the standardized canonical Redis queue key name for a given model.
-        Correct schema: global:queue:{model_type}:{provider}:{model_id}:{client_id}
+        Correct schema: aria:q:{model_type}:{provider}:{model_id}:{client_id}
         """
-        return f"global:queue:{model_type}:{provider}:{model_id}:{client_id}"
+        return f"aria:q:{model_type}:{provider}:{model_id}:{client_id}"
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
@@ -25,7 +25,7 @@ class BatchOptimizer:
     def get_queue_depths(self, known_models: Dict[str, str]) -> Dict[str, int]:
         """
         Polls Redis for the depth of all known queues.
-        known_models format: {"tts:orpheus-3b": "gpu:queue:tts:orpheus-3b", ...}
+        known_models format: {"tts:orpheus-3b": "aria:q:tts:local:orpheus-3b:dias", ...}
         """
         depths = {}
         for logic_id, queue_key in known_models.items():

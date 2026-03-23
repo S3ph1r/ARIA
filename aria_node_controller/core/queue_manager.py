@@ -16,9 +16,9 @@ class AriaQueueManager:
     plus crash recovery and dead letter routing.
     """
     
-    # Internal prefixes
-    PREFIX_PROCESSING = "global:processing"
-    PREFIX_DEAD = "global:dead"
+    # Internal prefixes (New Standard v1.0)
+    PREFIX_PROCESSING = "aria:s:proc" # Status: Processing
+    PREFIX_DEAD = "aria:q:dead"      # Queue: Dead letter
     MAX_RETRIES = 3
 
     def __init__(self, redis_client: redis.Redis):
@@ -48,7 +48,8 @@ class AriaQueueManager:
                 model_type = task_data.get("model_type")
                 provider = task_data.get("provider", "local")
                 model_id = task_data.get("model_id")
-                queue_key = f"global:queue:{model_type}:{provider}:{model_id}:{client_id}"
+                # New Standard: aria:q:{env}:{prov}:{model}:{client}
+                queue_key = f"aria:q:{model_type}:{provider}:{model_id}:{client_id}"
                 
                 # Circuit breaker check
                 if task_data["retry_count"] >= self.MAX_RETRIES:

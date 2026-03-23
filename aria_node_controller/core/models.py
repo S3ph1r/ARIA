@@ -31,7 +31,8 @@ class AriaTaskPayload(BaseModel):
     @property
     def queue_key(self) -> str:
         """Helper to get the standard Redis queue key for this task."""
-        return f"global:queue:{self.model_type}:{self.provider}:{self.model_id}:{self.client_id}"
+        # New Standard: aria:q:{env}:{prov}:{model}:{client}
+        return f"aria:q:{self.model_type}:{self.provider}:{self.model_id}:{self.client_id}"
 
 
 class AriaTaskResult(BaseModel):

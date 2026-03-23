@@ -174,7 +174,7 @@ Il loop principale:
        c. Se errore 429: RateLimiter.report_429() (Global Lockout)
     4. Se modello locale (es. `llm` via Qwen 3.5):
        a. BatchOptimizer avvia `llama-server.exe` (se non attivo)
-       b. Consuma task dalla coda `global:queue:llm:local:{model_id}`
+       b. Consuma task dalla coda `aria:q:{model_type}:local:{model_id}:{client_id}`
     5. Se modello locale diverso da quello in VRAM: unload → load nuovo
     6. Consuma task dalla coda del modello scelto (BRPOP)
     7. **Risoluzione Intent (Aria-side)**:
@@ -182,7 +182,7 @@ Il loop principale:
        - Se presente `voice_id`, `intent_id` o `theme_id`, consulta il registro locale.
        - Inietta i path fisici (`ref.wav`, `ref.txt`, `system_prompt`) nel payload.
     8. Esegui inferenza con backend appropriato
-    9. Scrivi risultato in `global:callback:{client_id}:{job_id}` (v2.1) o `gpu:result:{client_id}:{job_id}` (legacy)
+    9. Scrivi risultato in `aria:c:{client_id}:{job_id}`
     10. Torna a 2
 ```
 
@@ -228,43 +228,17 @@ client.watcher.register_callback("tts", on_voice_ready)
 client.watcher.start()
 ```
 
-### 3.3 ARIA Redis Bus
+### 3.3 ARIA Redis Bus (Shared Interface)
 
-Redis è il **sistema nervoso** di ARIA. Non è un componente di ARIA — è
-l'infrastruttura su cui ARIA opera. Deve essere sempre accessibile.
+Redis è il **sistema nervoso** di ARIA. Non è un componente di ARIA — è l'infrastruttura su cui ARIA opera per ricevere task dai Client e restituire i risultati in modo asincrono.
 
-Struttura chiavi completa:
+Per garantire la portabilità, l'agnosticismo e il supporto multi-client, ARIA segue un protocollo di comunicazione formale.
 
-```
-# Code di input (scritte dal Client, lette dal Server)
-# Pattern Locale: gpu:queue:{model_type}:{model_id}
-gpu:queue:tts:orpheus-3b
-gpu:queue:music:musicgen-small
-
-# Pattern Cloud Gateway (v2.0): global:queue:cloud:{provider}:{model_id}:{client_id}
-global:queue:cloud:google:gemini-flash-lite-latest:dias
-
-# Task in esecuzione (visibility timeout, prevenzione perdita su crash)
-gpu:processing:{job_id}               # Hash, TTL = timeout_seconds task
-
-# Risultati (scritti dal Server, letti dal Client)
-gpu:result:{client_id}:{job_id}       # String JSON, TTL configurabile
-  es: gpu:result:dias-minipc:uuid-123
-
-# Stato Server (scritto dal Server ogni 10s)
-gpu:server:status                     # Hash: {status, active_backends, available_voices, vram}
-gpu:server:semaphore                  # String: "green" | "red" | "busy"
-gpu:server:heartbeat                  # Timestamp ultimo heartbeat
-
-**Heartbeat Dinamico**: Il registro dello stato (`gpu:server:status`) include un array `available_voices` che scansiona in tempo reale la cartella locale `%ARIA_ROOT%\data\voices\`. Questo permette ai client (es. Dashboard DIAS) di mostrare solo le voci effettivamente pronte all'uso senza configurazioni statiche.
-
-# Task scaduti (scritti dal Client Watcher)
-gpu:dead:{client_id}:{job_id}         # Hash con motivo scadenza
-
-# Metriche (opzionale, per monitoring)
-gpu:metrics:completed_count           # Contatore totale task completati
-gpu:metrics:avg_duration:{model_id}   # Media mobile durata per modello
-```
+> [!IMPORTANT]
+> **Specifiche Tecniche & Naming**: La struttura delle code, dei payload JSON e i registri di stato sono definiti nel documento ufficiale:
+> [**ARIA-API-Contract.md**](ARIA-API-Contract.md)
+>
+> Questo contratto deve essere rispettato da tutti i Client (es. DIAS) e da tutti i Backend per garantire l'intercambiabilità dei nodi.
 
 ---
 

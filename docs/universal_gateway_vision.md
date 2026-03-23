@@ -60,8 +60,8 @@ Scenario: Acquisto di un nuovo hardware (es. MiniPC per ospitare Agent Apps).
 
 ### Ristrutturazione delle Code Redis
 Per abbracciare questa visione, i prefissi si "universalizzano":
-- `global:queue:local:{model_type}:{model_id}` -> Inferenza su GPU interna ad ARIA.
-- `global:queue:cloud:{provider}:{model_id}` -> Inferenza remota pre-filtrata da ARIA. (Esempio: `global:queue:cloud:google:gemini-3.1-flash`)
+- `aria:q:local:{model_type}:{model_id}:{client_id}` -> Inferenza su GPU interna ad ARIA.
+- `aria:q:cloud:{provider}:{model_id}:{client_id}` -> Inferenza remota pre-filtrata da ARIA. (Esempio: `aria:q:cloud:google:gemini-1.5-flash:dias`)
 
 ### Standardizzazione del Payload (Task di ARIA)
 ```json

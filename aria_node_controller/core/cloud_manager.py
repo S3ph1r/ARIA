@@ -60,8 +60,8 @@ class CloudManager:
         while not self._stop_event.is_set():
             try:
                 # Dynamic discovery of cloud queues
-                # Pattern: global:queue:cloud:{provider}:{model_id}:{client_id}
-                cloud_queues = list(self.qm.redis.scan_iter(match="global:queue:cloud:*:*:*"))
+                # New Standard: aria:q:cloud:{provider}:{model_id}:{client_id}
+                cloud_queues = list(self.qm.redis.scan_iter(match="aria:q:cloud:*:*:*"))
                 
                 if not cloud_queues:
                     time.sleep(2)

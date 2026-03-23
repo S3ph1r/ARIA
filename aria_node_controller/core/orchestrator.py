@@ -477,7 +477,7 @@ class NodeOrchestrator:
         last_heartbeat = 0
         while self.running:
             # 1. Discover all active LOCAL queues for these models
-            # Pattern: global:queue:*:local:{model_id}:*
+            # New Pattern: aria:q:*:local:{model_id}:*
             known_models = {}
             for model_id in model_logic_ids:
                 pattern = self.optimizer.build_queue_key("*", model_id, "local", "*")
