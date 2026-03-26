@@ -91,18 +91,26 @@ class Qwen3TTSBackend:
         voice_ref_path_str = payload.get("voice_ref_audio_path")
 
         if voice_id and not voice_ref_path_str:
+            # 1. Prova prima la nuova gerarchia (Standard)
+            asset_voice_dir = aria_root / "data" / "assets" / "voices" / voice_id
+            # 2. Prova la vecchia gerarchia (Legacy)
+            legacy_voice_dir = aria_root / "data" / "voices" / voice_id
+            
+            # Scegli la cartella che esiste
+            voice_dir = asset_voice_dir if asset_voice_dir.exists() else legacy_voice_dir
+            
             # Risolvi dalla Voice Library ARIA (preferisce ref_padded.wav)
-            voice_dir = aria_root / "data" / "voices" / voice_id
             ref_padded = voice_dir / "ref_padded.wav"
             ref_plain   = voice_dir / "ref.wav"
+            
             if ref_padded.exists():
                 voice_ref_path_str = str(ref_padded)
-                logger.info(f"Resolved voice '{voice_id}' → ref_padded.wav")
+                logger.info(f"Resolved voice '{voice_id}' → {voice_ref_path_str}")
             elif ref_plain.exists():
                 voice_ref_path_str = str(ref_plain)
                 logger.warning(
-                    f"ref_padded.wav non trovato per '{voice_id}', uso ref.wav "
-                    "(potrebbe esserci bleeding fonetico — esegui create_padded_ref.py)"
+                    f"ref_padded.wav non trovato per '{voice_id}' in {voice_dir}, uso ref.wav "
+                    "(esegui create_padded_ref.py per migliorare la qualità)"
                 )
             else:
                 logger.info(f"Ricevuto voice_id='{voice_id}' ma nessun ref.wav trovato in {voice_dir}. Procedo (ok se CustomVoice).")

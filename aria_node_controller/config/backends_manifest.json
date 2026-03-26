@@ -1,6 +1,11 @@
 {
   "backends": {
     "fish-s1-mini": {
+      "metadata": {
+        "display_name": "Fish Speech S1-mini",
+        "description": "Modello TTS ad alta espressivitÃƒÂ  con supporto cloning e emotion-markers.",
+        "capabilities": ["tts", "voice-cloning", "emotion-tagging"]
+      },
       "port": 8080,
       "health_url": "http://localhost:8080/v1/health",
       "startup_wait": 90,
@@ -10,13 +15,18 @@
       "script": "tools/api_server.py",
       "args": [
         "--listen", "0.0.0.0:8080",
-        "--llama-checkpoint-path", "data/models/fish-s1-mini",
-        "--decoder-checkpoint-path", "data/models/fish-s1-mini/codec.pth",
+        "--llama-checkpoint-path", "data/assets/models/fish-s1-mini",
+        "--decoder-checkpoint-path", "data/assets/models/fish-s1-mini/codec.pth",
         "--decoder-config-name", "modded_dac_vq"
       ],
       "companion": "voice-cloning"
     },
     "voice-cloning": {
+      "metadata": {
+        "display_name": "Fish Voice Encoder",
+        "description": "Backend di supporto per l'encoding VQGAN dei campioni vocali.",
+        "capabilities": ["audio-encoding"]
+      },
       "port": 8081,
       "health_url": "http://localhost:8081/health",
       "startup_wait": 60,
@@ -25,6 +35,11 @@
       "script": "voice_cloning_server.py"
     },
     "qwen3-tts-1.7b": {
+      "metadata": {
+        "display_name": "Qwen3-TTS 1.7B",
+        "description": "Motore TTS per audiolibri con supporto Natural Language Instruct e calore vocale superiore.",
+        "capabilities": ["tts", "instruction-following", "auto-padding", "audiobook-style"]
+      },
       "port": 8083,
       "health_url": "http://localhost:8083/health",
       "startup_wait": 240,
@@ -32,11 +47,16 @@
       "template": "envs/templates/qwen3-tts.yml",
       "script": "aria_node_controller/qwen3_server.py",
       "args": [
-        "--model-path", "data/models/qwen3-tts-1.7b",
+        "--model-path", "data/assets/models/qwen3-tts-1.7b",
         "--port", "8083"
       ]
     },
     "qwen3.5-35b-moe-q3ks": {
+      "metadata": {
+        "display_name": "Qwen3.5 35B MoE",
+        "description": "Modello LLM locale ad alte prestazioni operato via Llama_cpp (GGUF).",
+        "capabilities": ["chat", "reasoning", "creative-writing"]
+      },
       "port": 8085,
       "health_url": "http://localhost:8085/v1/health",
       "startup_wait": 300,
@@ -44,8 +64,14 @@
       "script": "aria_node_controller/llm_server.py"
     },
     "sox": {
+      "metadata": {
+        "display_name": "SoX Audio Engine",
+        "description": "Utility di sistema per l'elaborazione e conversione audio.",
+        "capabilities": ["audio-processing", "resampling", "mixing"]
+      },
       "env_prefix": "envs/sox",
       "conda_pkg": "sox -c conda-forge"
     }
   }
 }
+

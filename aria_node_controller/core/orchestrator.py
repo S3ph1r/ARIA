@@ -18,6 +18,7 @@ from .batch_optimizer import BatchOptimizer
 from .logger import get_logger
 import re
 from .models import AriaTaskResult
+from .registry_manager import AriaRegistryManager
 
 # Backends
 try:
@@ -389,6 +390,12 @@ class NodeOrchestrator:
             rate_limiter=self.rate_limiter
         )
 
+        # Registry Manager — Discovery v1.0
+        self.registry = AriaRegistryManager(
+            aria_root=ARIA_ROOT,
+            redis_client=redis_client
+        )
+
         
     def _start_http_server(self):
         """Avvia l'Asset Server HTTP nativo per file statici su C:/Users/Roberto/aria/data/outputs"""
@@ -415,8 +422,11 @@ class NodeOrchestrator:
         
         # Start Cloud Manager
         self.cloud_manager.start()
+
+        # Publish Master Registry (Discovery)
+        self.registry.publish()
         
-        logger.info("Orchestrator task loop and CloudManager started")
+        logger.info("Orchestrator task loop and CloudManager started. Master Registry published.")
         
         # Avvia HTTP Asset Server Parallelo
         self.http_thread = threading.Thread(target=self._start_http_server, daemon=True)
@@ -443,10 +453,22 @@ class NodeOrchestrator:
         logger.info(f"Orchestrator semaphore set to {'GREEN' if state else 'RED'}")
 
     def _discover_voices(self) -> list:
-        """Scansiona la cartella data/voices per trovare le voci disponibili."""
-        voices_dir = self.aria_root / "data" / "voices"
-        if not voices_dir.exists():
-            return []
+        """Scansiona sia la nuova cartella data/assets/voices che la legacy data/voices."""
+        voices = set()
+        
+        # 1. Nuova gerarchia (Standard)
+        asset_voices_dir = self.aria_root / "data" / "assets" / "voices"
+        if asset_voices_dir.exists():
+            for d in asset_voices_dir.iterdir():
+                if d.is_dir(): voices.add(d.name)
+        
+        # 2. Vecchia gerarchia (Legacy)
+        legacy_voices_dir = self.aria_root / "data" / "voices"
+        if legacy_voices_dir.exists():
+            for d in legacy_voices_dir.iterdir():
+                if d.is_dir(): voices.add(d.name)
+        
+        return list(voices)
         
         # Ogni sottocartella in data/voices/ è una voce
         return [d.name for d in voices_dir.iterdir() if d.is_dir()]
