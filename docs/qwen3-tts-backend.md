@@ -90,7 +90,7 @@ conda create --prefix %ARIA_ROOT%\envs\qwen3tts python=3.12 -y
 
 ```cmd
 huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-Base ^
-    --local-dir %ARIA_ROOT%\data\models\qwen3-tts-1.7b
+    --local-dir %ARIA_ROOT%\data\\assets\\models\\qwen3-tts-1.7b
 ```
 
 ---
@@ -118,7 +118,7 @@ Il server Qwen3 è integrato nel codice ARIA:
 ```
 
 Il server risolve automaticamente il `voice_id`:
-1. Cerca `%ARIA_ROOT%\data\voices\luca\ref_padded.wav`
+1. Cerca `%ARIA_ROOT%\data\\assets\\voices\\luca\ref_padded.wav`
 2. Se `ref_padded.wav` non esiste, lo genera da `ref.wav` (adds 0.5s silenzio)
 3. Carica `ref.txt` se presente (ICL ad alta fedeltà)
 
@@ -234,7 +234,7 @@ OUTPUT:  gpu:result:{client_id}:{job_id}
 Qwen3 usa la Voice Library condivisa con Fish, con la differenza del padding:
 
 ```
-%ARIA_ROOT%\data\voices\
+%ARIA_ROOT%\data\\assets\\voices\\
 ├── angelo/                 ← Voce Narratore Maschile (Calda)
 ├── luca/                   ← Voce Narratore Maschile (Tecnica/Narrativa)
 │   ├── ref.wav             ← sample originale (NON usato da Qwen3)

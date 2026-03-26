@@ -11,7 +11,7 @@
 - [x] Scraping audio automatico via `yt-dlp -x --audio-format wav`
 - [x] Taglio automatico via `ffmpeg` (mono, 44100 Hz)
 - [x] Trascrizione automatizzata supportata dall'API `gemini-flash-lite-latest` (Gemini 3.1)
-- [x] Salvataggio automatico nella Voice Library `data/voices/<voice_id>/`
+- [x] Salvataggio automatico nella Voice Library `data/assets/voices/<voice_id>/`
 - [ ] Recuperare voice link di YouTube dal team e avviare il tool per generare il sample finale
 
 ---

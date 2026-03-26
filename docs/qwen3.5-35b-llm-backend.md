@@ -67,7 +67,7 @@ Il modello viene scaricato da Hugging Face in formato GGUF:
 ```cmd
 huggingface-cli download bartowski/Qwen_Qwen3.5-35B-A3B-GGUF ^
     --include "*Q3_K_S.gguf*" ^
-    --local-dir %ARIA_ROOT%\data\models\Qwen3.5-35B-A3B-GGUF
+    --local-dir %ARIA_ROOT%\data\\assets\\models\\Qwen3.5-35B-A3B-GGUF
 ```
 
 ---

@@ -945,24 +945,24 @@ models:
   tts:
     fish-s1-mini:
       enabled: true
-      model_path: "aria/data/models/fish-s1-mini"
+      model_path: "aria/data/assets/models/fish-s1-mini"
       estimated_vram_gb: 4.0
       max_retries: 2
     orpheus-3b:
       enabled: false
-      model_path: "aria/data/models/orpheus-3b-q4"
+      model_path: "aria/data/assets/models/orpheus-3b-q4"
       estimated_vram_gb: 7.0
       max_retries: 2
   music:
     musicgen-small:
       enabled: false
-      model_path: "aria/data/models/musicgen-small"
+      model_path: "aria/data/assets/models/musicgen-small"
       estimated_vram_gb: 4.0
       max_retries: 1
   llm:
     llama-3.1-8b:
       enabled: false
-      model_path: "aria/data/models/llama-3.1-8b-q4"
+      model_path: "aria/data/assets/models/llama-3.1-8b-q4"
       estimated_vram_gb: 5.5
       max_retries: 1
 
@@ -1074,8 +1074,8 @@ Nella versione v2.0, ARIA si evolve da semplice "worker di PDF/WAV" a un vero pr
 
 1. **Agnosticismo del Client**: Un'app (come DIAS) non deve sapere che ARIA sta usando Fish S1-mini o Llama-3. Deve solo richiedere una "Azione" (es: `generate_speech`) con dei parametri semantici (`voice: "narratore"`).
 2. **Internalizzazione degli Asset**: ARIA gestisce un proprio file system strutturato per gli asset:
-   - `/aria/data/voices/{voice_id}/ref.wav`
-   - `/aria/data/voices/{voice_id}/ref.txt`
+   - `/aria/data/assets/voices/{voice_id}/ref.wav`
+   - `/aria/data/assets/voices/{voice_id}/ref.txt`
    - `/aria/data/prompts/{task_type}/system_prompt.txt`
 
 ### Flusso di Risoluzione Interna (ARIA-side)
@@ -1107,8 +1107,8 @@ Il repository Git contiene tutto ciò che definisce il "cervello" e i "muscoli" 
 
 ### 15.2 Assets (Local / Runtime)
 Gli asset pesanti e specifici del nodo **non sono in Git** per design. Devono essere replicati o scaricati sul nuovo PC:
-1. **Modelle AI (`data/models/`)**: Giga di pesi (GGUF, Safetensors) scaricabili via `aria-download.bat`.
-2. **Voice Library (`data/voices/`)**: La libreria delle voci clonate. È un database locale. Si consiglia di sincronizzarla separatamente se si vuole consistenza tra nodi.
+1. **Modelle AI (`data/assets/models/`)**: Giga di pesi (GGUF, Safetensors) scaricabili via `aria-download.bat`.
+2. **Voice Library (`data/assets/voices/`)**: La libreria delle voci clonate. È un database locale. Si consiglia di sincronizzarla separatamente se si vuole consistenza tra nodi.
 3. **Ambienti Python (`envs/` o Conda)**: Vanno ricreati seguendo `SETUP_PC_GAMING.md` per garantire la compatibilità con l'hardware specifico (driver CUDA, architettura sm_xxx).
 
 ### 15.3 Piano di "Cold Boot" (Nuovo Nodo)

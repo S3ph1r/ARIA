@@ -95,7 +95,7 @@ conda create --prefix %ARIA_ROOT%\envs\fish-speech-env python=3.10 -y
 
 ```cmd
 huggingface-cli download fishaudio/openaudio-s1-mini ^
-    --local-dir %ARIA_ROOT%\data\models\fish-s1-mini
+    --local-dir %ARIA_ROOT%\data\\assets\\models\\fish-s1-mini
 ```
 
 ---
@@ -172,7 +172,7 @@ payload = {
 Fish usa la Voice Library condivisa con Qwen3:
 
 ```
-%ARIA_ROOT%\data\voices\
+%ARIA_ROOT%\data\\assets\\voices\\
 ├── angelo/                 ← Disponibile (ref.wav present)
 ├── luca/
 │   ├── ref.wav             ← Usato da Fish TTS
