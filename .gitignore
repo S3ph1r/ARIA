@@ -1,63 +1,10 @@
-# ARIA - Git Ignore
-
-# Python 
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environments & Conda
-envs/
-venv/
-.venv/
-conda-bld/
-
-# ARIA Specific Assets (Modelli e Voci pesanti)
-data/models/*/
-data/voices/*/
-data/outputs/*/
-data/models/*.bin
-data/models/*.pth
-data/models/*.onnx
-data/voices/**/*.wav
-data/voices/**/*.mp3
-data/voices/**/*.ref
-!data/voices/.gitkeep
-!data/models/.gitkeep
-!data/outputs/.gitkeep
-
-# Local Configurations (SENSITIVE / MACHINE SPECIFIC)
-node_settings.json
-.env
-
-# Logs and Archives
-logs/
-archive/
-*.log
-
-# OS Specific
-.DS_Store
-Thumbs.db
-
-# Project generated results
-comparison_results/
-final_comparison_report.json
-ndata/assets/n
-n
+# ARIA - Git Ignore  
+__pycache__/  
+*.py[cod]  
+envs/  
+venv/  
+data/assets/  
+data/models/  
+data/voices/  
+data/outputs/  
+logs/ 
