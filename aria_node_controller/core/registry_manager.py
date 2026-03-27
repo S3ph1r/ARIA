@@ -66,15 +66,23 @@ class AriaRegistryManager:
                         try:
                             with open(profile_path, "r", encoding="utf-8") as f:
                                 profile = json.load(f)
+                                # Aggiunta automatica del path del campione se esiste ref.wav
+                                ref_path = asset_id_dir / "ref.wav"
+                                if ref_path.exists():
+                                    profile["sample_path"] = f"{type_name}/{asset_id_dir.name}/ref.wav"
+                                
                                 registry["assets"][type_name][asset_id_dir.name] = profile
                         except Exception as e:
                             logger.error(f"Failed to read profile.json in {asset_id_dir.name}: {e}")
                     else:
-                        registry["assets"][type_name][asset_id_dir.name] = {
+                        voice_data = {
                             "id": asset_id_dir.name, 
                             "status": "legacy",
                             "note": "Profilo manuale mancante"
                         }
+                        if (asset_id_dir / "ref.wav").exists():
+                            voice_data["sample_path"] = f"{type_name}/{asset_id_dir.name}/ref.wav"
+                        registry["assets"][type_name][asset_id_dir.name] = voice_data
 
         # 3. Scan Legacy Voices (se non già presenti negli assets standard)
         if self.legacy_voices_dir.exists():
@@ -89,15 +97,20 @@ class AriaRegistryManager:
                         with open(profile_path, "r", encoding="utf-8") as f:
                             profile = json.load(f)
                             profile["status"] = profile.get("status", "legacy")
+                            if (voice_dir / "ref.wav").exists():
+                                profile["sample_path"] = f"legacy_voices/{voice_dir.name}/ref.wav"
                             registry["assets"]["voices"][voice_dir.name] = profile
                     except Exception as e:
                         logger.error(f"Failed to read profile.json in legacy voice {voice_dir.name}: {e}")
                 else:
-                    registry["assets"]["voices"][voice_dir.name] = {
+                    voice_data = {
                         "id": voice_dir.name,
                         "status": "legacy",
                         "note": "Trovata in data/voices/ (senza profilo)"
                     }
+                    if (voice_dir / "ref.wav").exists():
+                        voice_data["sample_path"] = f"legacy_voices/{voice_dir.name}/ref.wav"
+                    registry["assets"]["voices"][voice_dir.name] = voice_data
 
         # 4. Scan Legacy Models (se non già presenti negli assets standard)
         if self.legacy_models_dir.exists():
