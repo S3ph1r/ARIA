@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import redis; r = redis.Redis\\(host='192.168.1.120', port=6379, decode_responses=True\\); print\\('Redis OK:', r.ping\\(\\)\\)\")",
+      "Bash(/c/Users/Roberto/aria/envs/aria-cloud/python.exe -c \"import redis; r=redis.Redis\\(host='192.168.1.120',port=6379,decode_responses=True\\); print\\('Redis ping:', r.ping\\(\\)\\)\")",
+      "Bash(redis-cli -h 192.168.1.120 exists \"aria:c:dias:d2-pad-90448d356e\")",
+      "Bash(redis-cli -h 192.168.1.120 get \"aria:c:dias:d2-pad-90448d356e\")",
+      "Bash(winpty redis-cli *)",
+      "Bash(python3 -c \"import redis; r=redis.Redis\\(host='192.168.1.120',port=6379\\); v=r.get\\('aria:c:dias:d2-pad-90448d356e'\\); print\\('EXISTS:', v is not None\\); print\\('VALUE:', v\\)\")",
+      "Bash(python -c \"import redis; r=redis.Redis\\(host='192.168.1.120',port=6379\\); v=r.get\\('aria:c:dias:d2-pad-90448d356e'\\); print\\('EXISTS:', v is not None\\); print\\('VALUE:', v\\)\")",
+      "Bash(curl -s http://127.0.0.1:8084/health)",
+      "Bash(curl -s http://127.0.0.1:8084/status)",
+      "Bash(curl -s \"http://127.0.0.1:8084/status/d2-pad-90448d356e\")",
+      "Bash(curl -s http://127.0.0.1:8081/health)",
+      "Bash(curl -s http://127.0.0.1:8081/status)",
+      "Bash(curl -s http://127.0.0.1:8080/health)",
+      "Bash(curl -s http://127.0.0.1:8082/health)",
+      "Bash(curl -s http://127.0.0.1:8083/health)",
+      "Bash(python -c ' *)",
+      "Bash(python3)",
+      "Bash(python aria_node_controller/main_tray.py --help)",
+      "Bash(\"c:/Users/Roberto/miniconda3/python.exe\" -c \"import redis; r=redis.Redis\\(host='192.168.1.120',port=6379\\); print\\('queue:', r.llen\\('aria:q:mus:local:acestep-1.5-xl-sft:dias'\\)\\); print\\('cb:', r.exists\\('aria:c:dias:d2-pad-90448d356e'\\)\\); print\\('proc:', r.exists\\('aria:s:proc:d2-pad-90448d356e'\\)\\)\")",
+      "Bash(c:/Users/Roberto/miniconda3/python.exe -c ' *)",
+      "Bash(\"c:/Users/Roberto/aria/envs/dias-sound-engine/python.exe\" -c \"import demucs; print\\('demucs OK:', demucs.__version__\\)\")",
+      "Bash(start \"\" \"c:\\\\\\\\Users\\\\\\\\Roberto\\\\\\\\aria\\\\\\\\data\\\\\\\\assets\\\\\\\\sound_library\\\\\\\\pad\\\\\\\\d2-pad-90448d356e\\\\\\\\d2-pad-90448d356e.wav\")",
+      "Bash(c:/Users/Roberto/aria/envs/dias-sound-engine/python.exe -c ' *)",
+      "Bash(\"c:/Users/Roberto/aria/envs/dias-sound-engine/python.exe\" -m pip install demucs --no-deps -q)",
+      "Bash(\"c:/Users/Roberto/aria/envs/dias-sound-engine/python.exe\" -m pip install dora-search omegaconf hydra-core julius openunmix diffq lameenc --no-deps -q)",
+      "Bash(\"c:/Users/Roberto/aria/envs/dias-sound-engine/python.exe\" -m pip install antlr4-python3-runtime==4.9.3 -q)"
+    ]
+  }
+}

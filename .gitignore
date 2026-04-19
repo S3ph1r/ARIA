@@ -7,4 +7,19 @@ data/assets/
 data/models/  
 data/voices/  
 data/outputs/  
-logs/ 
+logs/
+
+# Local configuration and variables
+.env
+node_settings.json
+
+# Local scripts and scratchpads
+scratch/
+
+# Symlinks or local model folders
+ACE-Step
+ACE-Step/
+Qwen3
+Qwen3/
+Voice
+Voice/

@@ -14,15 +14,13 @@ class AriaRegistryManager:
     """
     REDIS_KEY_MASTER = "aria:registry:master"
 
-    def __init__(self, aria_root: Path, redis_client: redis.Redis):
+    def __init__(self, aria_root: Path, redis_client: redis.Redis, local_ip: str = "127.0.0.1"):
         self.aria_root = aria_root
         self.redis = redis_client
+        self.local_ip = local_ip
         self.manifest_path = aria_root / "aria_node_controller" / "config" / "backends_manifest.json"
-        # Standard: data/assets/ (nuova gerarchia)
-        self.assets_dir = aria_root / "data" / "assets"
-        # Supporto legacy: data/voices/ e data/models/ (per compatibilità durante la transizione)
-        self.legacy_voices_dir = aria_root / "data" / "voices"
-        self.legacy_models_dir = aria_root / "data" / "models"
+        # Root degli assets: data/assets/
+        self.assets_base_dir = aria_root / "data" / "assets"
 
     def build_registry(self) -> dict:
         """Scans filesystem and manifest to build the full JSON."""
@@ -34,7 +32,11 @@ class AriaRegistryManager:
                 "models": {},
                 "voices": {},
                 "loras": {},
-                "personas": {}
+                "personas": {},
+                "pad": {},
+                "amb": {},
+                "sfx": {},
+                "sting": {}
             }
         }
 
@@ -47,92 +49,65 @@ class AriaRegistryManager:
             except Exception as e:
                 logger.error(f"Failed to read backends_manifest: {e}")
 
-        # 2. Scan Standard Assets (data/assets/{type}/{id})
-        if self.assets_dir.exists():
-            for asset_type_dir in self.assets_dir.iterdir():
-                if not asset_type_dir.is_dir():
+        # 2. Scan Assets (data/assets/)
+        if self.assets_base_dir.exists():
+            # Scansioniamo tutte le top-level directory in data/assets
+            # ESCLUDIAMO 'models' perché contiene i pesi e non asset consumabili
+            EXCLUDED_DIRS = ["models"]
+            
+            for top_dir in self.assets_base_dir.iterdir():
+                if not top_dir.is_dir() or top_dir.name in EXCLUDED_DIRS:
                     continue
                 
-                type_name = asset_type_dir.name
-                if type_name not in registry["assets"]:
-                    registry["assets"][type_name] = {}
-
-                for asset_id_dir in asset_type_dir.iterdir():
-                    if not asset_id_dir.is_dir():
-                        continue
-                    
-                    profile_path = asset_id_dir / "profile.json"
-                    if profile_path.exists():
-                        try:
-                            with open(profile_path, "r", encoding="utf-8") as f:
-                                profile = json.load(f)
-                                # Aggiunta automatica del path del campione se esiste ref.wav
-                                ref_path = asset_id_dir / "ref.wav"
-                                if ref_path.exists():
-                                    profile["sample_path"] = f"{type_name}/{asset_id_dir.name}/ref.wav"
-                                
-                                registry["assets"][type_name][asset_id_dir.name] = profile
-                        except Exception as e:
-                            logger.error(f"Failed to read profile.json in {asset_id_dir.name}: {e}")
-                    else:
-                        voice_data = {
-                            "id": asset_id_dir.name, 
-                            "status": "legacy",
-                            "note": "Profilo manuale mancante"
-                        }
-                        if (asset_id_dir / "ref.wav").exists():
-                            voice_data["sample_path"] = f"{type_name}/{asset_id_dir.name}/ref.wav"
-                        registry["assets"][type_name][asset_id_dir.name] = voice_data
-
-        # 3. Scan Legacy Voices (se non già presenti negli assets standard)
-        if self.legacy_voices_dir.exists():
-            for voice_dir in self.legacy_voices_dir.iterdir():
-                if not voice_dir.is_dir() or voice_dir.name in registry["assets"]["voices"]:
-                    continue
-                
-                # Cerca profile.json anche qui (Pragmatic approach)
-                profile_path = voice_dir / "profile.json"
-                if profile_path.exists():
-                    try:
-                        with open(profile_path, "r", encoding="utf-8") as f:
-                            profile = json.load(f)
-                            profile["status"] = profile.get("status", "legacy")
-                            if (voice_dir / "ref.wav").exists():
-                                profile["sample_path"] = f"legacy_voices/{voice_dir.name}/ref.wav"
-                            registry["assets"]["voices"][voice_dir.name] = profile
-                    except Exception as e:
-                        logger.error(f"Failed to read profile.json in legacy voice {voice_dir.name}: {e}")
+                # Se è 'sound_library', scendiamo di un livello per le categorie (pad, sfx, etc.)
+                dirs_to_scan = []
+                if top_dir.name == "sound_library":
+                    dirs_to_scan = [d for d in top_dir.iterdir() if d.is_dir()]
                 else:
-                    voice_data = {
-                        "id": voice_dir.name,
-                        "status": "legacy",
-                        "note": "Trovata in data/voices/ (senza profilo)"
-                    }
-                    if (voice_dir / "ref.wav").exists():
-                        voice_data["sample_path"] = f"legacy_voices/{voice_dir.name}/ref.wav"
-                    registry["assets"]["voices"][voice_dir.name] = voice_data
+                    dirs_to_scan = [top_dir]
 
-        # 4. Scan Legacy Models (se non già presenti negli assets standard)
-        if self.legacy_models_dir.exists():
-            for model_dir in self.legacy_models_dir.iterdir():
-                if not model_dir.is_dir() or model_dir.name in registry["assets"]["models"]:
-                    continue
-                
-                profile_path = model_dir / "profile.json"
-                if profile_path.exists():
-                    try:
-                        with open(profile_path, "r", encoding="utf-8") as f:
-                            profile = json.load(f)
-                            profile["status"] = profile.get("status", "legacy")
-                            registry["assets"]["models"][model_dir.name] = profile
-                    except Exception as e:
-                        logger.error(f"Failed to read profile.json in legacy model {model_dir.name}: {e}")
-                else:
-                    registry["assets"]["models"][model_dir.name] = {
-                        "id": model_dir.name,
-                        "status": "legacy",
-                        "note": "Trovata in data/models/ (senza profilo)"
-                    }
+                for category_dir in dirs_to_scan:
+                    type_name = category_dir.name
+                    if type_name not in registry["assets"]:
+                        registry["assets"][type_name] = {}
+
+                    for asset_id_dir in category_dir.iterdir():
+                        if not asset_id_dir.is_dir(): continue
+                        
+                        profile_path = asset_id_dir / "profile.json"
+                        # Calcolo URL relativo per la porta 8082
+                        # Se è dentro sound_library, il path HTTP include 'sound_library'
+                        is_sl = "sound_library" in str(category_dir.relative_to(self.assets_base_dir))
+                        http_subpath = f"sound_library/{type_name}" if is_sl else type_name
+
+                        if profile_path.exists():
+                            try:
+                                with open(profile_path, "r", encoding="utf-8") as f:
+                                    profile = json.load(f)
+                                    if "description" not in profile and "prompt" in profile:
+                                        profile["description"] = profile["prompt"]
+
+                                    asset_wav = asset_id_dir / f"{asset_id_dir.name}.wav"
+                                    if not asset_wav.exists():
+                                        wavs = list(asset_id_dir.glob("*.wav"))
+                                        if wavs: asset_wav = wavs[0]
+                                        else: asset_wav = None
+
+                                    if asset_wav and asset_wav.exists():
+                                        profile["sample_url"] = f"http://{self.local_ip}:8082/assets/{http_subpath}/{asset_id_dir.name}/{asset_wav.name}"
+                                    
+                                    registry["assets"][type_name][asset_id_dir.name] = profile
+                            except Exception as e:
+                                logger.error(f"Failed to read profile.json in {asset_id_dir.name}: {e}")
+                        else:
+                            # Legacy fallback (voci e vecchi asset senza profile.json)
+                            voice_data = {"id": asset_id_dir.name, "status": "legacy"}
+                            wavs = list(asset_id_dir.glob("*.wav"))
+                            if wavs:
+                                voice_data["sample_url"] = f"http://{self.local_ip}:8082/assets/{http_subpath}/{asset_id_dir.name}/{wavs[0].name}"
+                            registry["assets"][type_name][asset_id_dir.name] = voice_data
+
+        return registry
 
         return registry
 
@@ -148,6 +123,41 @@ class AriaRegistryManager:
             logger.error(f"Errore critico durante la pubblicazione del Master Registry: {e}")
 
 if __name__ == "__main__":
-    # Test veloce se eseguito direttamente (richiede Redis attivo)
-    # python -m aria_node_controller.core.registry_manager
-    pass
+    # Invocazione manuale del registro: python -m aria_node_controller.core.registry_manager
+    import sys
+    from pathlib import Path
+    
+    # Risaliamo alla root del progetto
+    ARIA_ROOT = Path(__file__).resolve().parent.parent.parent
+    sys.path.insert(0, str(ARIA_ROOT))
+    
+    # Caricamento configurazioni ufficiali
+    # Nota: Usiamo try/except per fallback manuale se la GUI/settings non sono disponibili
+    try:
+        from aria_node_controller.settings_gui import load_settings
+        settings = load_settings()
+        r_host = settings.get("redis_host", "127.0.0.1")
+        r_port = settings.get("redis_port", 6379)
+        r_pass = settings.get("redis_password", None)
+        node_ip = settings.get("local_ip", "127.0.0.1")
+    except Exception:
+        # Fallback a valori di default se i settings falliscono
+        r_host = "127.0.0.1"
+        r_port = 6379
+        r_pass = None
+        node_ip = "127.0.0.1"
+
+    print(f"[*] Inizializzazione Registro Master ARIA...")
+    print(f"[*] Connessione a Redis: {r_host}:{r_port}")
+    
+    try:
+        r_client = redis.Redis(host=r_host, port=r_port, password=r_pass, decode_responses=True)
+        r_client.ping()
+        
+        manager = AriaRegistryManager(ARIA_ROOT, r_client, local_ip=node_ip)
+        print(f"[*] Scansione Warehouse in corso: {manager.assets_base_dir}...")
+        manager.publish()
+        print(f"[✅] Sincronizzazione completata con successo.")
+        
+    except Exception as e:
+        print(f"[❌] Errore durante la sincronizzazione: {e}")

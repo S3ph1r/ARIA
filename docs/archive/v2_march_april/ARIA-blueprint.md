@@ -114,7 +114,7 @@ Il codice è open source e ispezionabile.
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
-**Filosofia Agnostica**: ARIA non è legata a un IP specifico. La scoperta dei nodi avviene tramite il registro degli heartbeat su Redis. Per il registro completo dei servizi attivi (porte, code, ambienti), consultare [ARIA-Service-Registry.md](ARIA-Service-Registry.md).
+**Filosofia Agnostica**: ARIA non è legata a un IP specifico. La scoperta dei nodi avviene tramite il registro degli heartbeat su Redis. Per le specifiche tecniche di comunicazione, consultare [ARIA-network-interface.md](ARIA-network-interface.md).
 
 ### Flusso dati ad alto livello
 
@@ -148,7 +148,7 @@ Per garantire che ARIA sia facilmente installabile e resiliente ai reset del rep
 2.  **Automazione (Bootstrap)**: Lo script `bootstrap_aria.ps1` legge il manifest e ripristina istantaneamente gli ambienti mancanti (`envs/`).
 3.  **Portabilità**: Il codice non contiene più path assoluti; ogni risorsa è risolta rispetto alla radice del progetto tramite l'orchestratore.
 ```
-Per i dettagli sulla configurazione e l'accesso a Redis, consultare [ARIA-Service-Registry.md](ARIA-Service-Registry.md).
+Per i dettagli sulla configurazione e l'accesso a Redis, consultare [ARIA-network-interface.md](ARIA-network-interface.md).
 
 ---
 
@@ -160,21 +160,9 @@ ARIA Server è il processo che gira sul PC con GPU. Ha una sola responsabilità:
 **ricevere task da Redis, eseguirli sulla GPU, scrivere i risultati su Redis**.
 
 Non espone direttamente i modelli. Non conosce i client. Non ha stato applicativo
-oltre alla coda corrente. È stateless rispetto ai progetti — tutto lo stato vive su Redis.
+oltre alla coda corrente. È stateless rispetto ai progetti — tutto lo stato
+vive su Redis.
 
-#### 3.1.1 Avvio e Controllo Utente
-L'utente (es. il Giocatore sul PC Windows) avvia ARIA in modo ultra-semplificato facendo doppio click su un file Batch presente sul proprio Desktop (`C:\Users\Roberto\Desktop\ARIA.bat`).
-- Questo script lancia **unicamente** il Node Orchestrator (il Semaforo Redis e il process manager).
-- Apre un terminale CMD nero (`ARIA ORCHESTRATOR`) fondamentale per il monitoraggio visuale real-time dei log.
-- I backend pesanti (Qwen3, Fish, ACE-Step) rimangono inizialmente SPENTI. Verranno accesi dall'Orchestratore (che "spawnerà" nuove finestre terminali visibili) solo all'arrivo del prio task su Redis.
-
-**L'Interfaccia Tray Icon**
-Una volta avviato, in basso a destra (vicino all'orologio di Windows) appare l'icona di ARIA. Cliccando col tasto destro, l'utente ha il controllo totale sulle code, forzando le transizioni del Semaforo:
-
-1. 🟢 **GPU Libera (Workflow AI Completo)**: Rende l'hardware disponibile al 100%. L'Orchestratore processa i task.
-2. 🔴 **GPU Occupata (Solo Cloud Gateway)**: Imposta il semaforo su RED. L'inferenza locale si pausa. Nessun task va in timeout, semplicemente DIAS aspetta. È essenziale selezionare questo stato prima di lanciare un videogioco pesante per evitare driver crash (OOM).
-3. ⚙️ **Impostazioni...**: Apre la GUI basata su `customtkinter` per reimpostare path, API Keys di Cloud o parametri del nodo.
-4. ❌ **Esci**: Termina brutalmente in sicurezza (`.terminate()`) sia l'Orchestratore che QUALSIASI finestra/backend secondario Python collegato.
 Il loop principale:
 
 ```
@@ -240,59 +228,17 @@ client.watcher.register_callback("tts", on_voice_ready)
 client.watcher.start()
 ```
 
-### 3.3 ARIA Redis Bus (Shared Interface & API Contract)
+### 3.3 ARIA Redis Bus (Shared Interface)
 
 Redis è il **sistema nervoso** di ARIA. Non è un componente di ARIA — è l'infrastruttura su cui ARIA opera per ricevere task dai Client e restituire i risultati in modo asincrono.
-Per garantire la portabilità, l'agnosticismo e il supporto multi-client, ARIA segue un protocollo di comunicazione formale: il "Contratto" tra ARIA e i suoi Client (es. DIAS).
+
+Per garantire la portabilità, l'agnosticismo e il supporto multi-client, ARIA segue un protocollo di comunicazione formale.
 
 > [!IMPORTANT]
-> **Agnosticismo Assoluto**: ARIA non sa chi la chiama e non sa a cosa servono i file che genera. Il suo unico scopo è convertire un task JSON (rispettando il contratto qui delineato) nell'output desiderato, caricando in logica JIT l'ambiente necessario.
-
-#### La Nomenclatura delle Code (Input)
-**Pattern**: `aria:q:{type}:local:{model_id}:dias`
-Le app devono fare un `LPUSH` (o `RPUSH`) direttamente sulla coda di propria pertinenza.
-
-| Servizio Server JIT | Struttura Coda Esempio |
-| :--- | :--- |
-| **TTS (Qwen3)** | `aria:q:tts:local:qwen3-tts-1.7b:dias` |
-| **TTS (Fish)** | `aria:q:tts:local:fish-s1-mini:dias` |
-| **Testo (Qwen3.5 LLM)**| `aria:q:llm:local:qwen3.5-35b-moe-q3ks:dias` |
-| **Suono (PAD/Leitmotif)**| `aria:q:mus:local:acestep-1.5-xl-sft:dias` (model_id: acestep-1.5-xl-sft) |
-| **Suono (AMB/SFX/STING)**| `aria:q:mus:local:acestep-1.5-xl-sft:dias` (model_id: audiocraft-medium) |
-
-#### Payload Standard (Task Request)
-```json
-{
-  "job_id": "string (unico)",
-  "client_id": "string (es. dias)",
-  "model_type": "string (tts|llm|vision|sound)",
-  "provider": "string",
-  "model_id": "string",
-  "callback_key": "aria:c:{client_id}:{job_id}",
-  "timeout_seconds": 1800,
-  "payload": {
-     // I CAMPI INTERNI DIPENDONO DAL MODELLO.
-     // Vedere i documenti specifici in docs/backends/*.md
-  }
-}
-```
-
-#### Callback Standard (Task Result)
-Ricevuto tramite `BRPOP` sulla coda specificata da `callback_key`.
-
-```json
-{
-  "status": "done | error | timeout",
-  "job_id": "string",
-  "output": {
-    "text": "string (opzionale)",
-    "audio_url": "string (URL HTTP locale)",
-    "duration_seconds": 142.5
-  },
-  "error_code": null,
-  "processing_time": 68.2
-}
-```
+> **Specifiche Tecniche & Naming**: La struttura delle code, dei payload JSON e i registri di stato sono definiti nel documento ufficiale:
+> [**ARIA-API-Contract.md**](ARIA-API-Contract.md)
+>
+> Questo contratto deve essere rispettato da tutti i Client (es. DIAS) e da tutti i Backend per garantire l'intercambiabilità dei nodi.
 
 ---
 
@@ -336,8 +282,8 @@ class BaseBackend(ABC):
 | `tts` | `qwen3-tts-custom` | 6GB | transformers (nativo) | WAV mono 24kHz |
 | `llm` | `qwen3.5-35b-moe-q3ks` | 13GB (q3) | llama-server.exe | text (thinking) |
 | `llm` | `gemini-flash-lite` | Cloud | Google Gateway | text |
-| `mus` | `acestep-1.5-xl-sft` | 8 GB | ACE-Step DiT XL (wrapper 8084) | WAV 44.1kHz stereo |
-| `mus` | `audiocraft-medium` | 4-6 GB | AudioGen / MusicGen (wrapper 8086) | WAV 44.1kHz stereo |
+| `vision` | `qwen-vl-7b` | 8GB | transformers | text |
+| `stt` | `whisper-large-v3` | 3GB | faster-whisper | text + timestamps |
 
 ### Nota su VRAM e coesistenza
 
@@ -355,70 +301,59 @@ di default è sempre "un modello alla volta".
 
 ---
 
-## 4b. Backend Inventory — Stato Operativo
+## 4b. Backend Inventory — Stato Reale di Deploy
 
-Questa sezione documenta lo **stato operativo effettivo** dei backend sul PC Gaming (PC 139).  
-Per i dettagli tecnici di ogni backend, consultare il documento dedicato in `docs/backends/`.  
-Per la guida completa agli ambienti Python e CUDA, vedere [hardware-environments-setup.md](hardware-environments-setup.md).  
-Per il registro completo con porte e code Redis, vedere [ARIA-Service-Registry.md](ARIA-Service-Registry.md).
+Questa sezione documenta lo **stato operativo effettivo** dei backend sul PC Gaming.
+Per i dettagli tecnici di ogni backend, consultare il documento dedicato.
+Per la guida completa agli ambienti Python, vedere `docs/environments-setup.md`.
 
-### Architettura Ambienti (PC 139 — Aprile 2026)
+### Architettura Ambienti (PC Gaming — Marzo 2026)
 
-**Filosofia**: Miniconda globale (`C:\Users\Roberto\miniconda3\`) come gestore +
-ambienti Python isolati project-local (`C:\Users\Roberto\aria\envs\`).
+**Filosofia**: Miniconda globale (`%MINICONDA_ROOT%`) come gestore +
+ambienti Python isolati project-local (`%ARIA_ROOT%\envs\`).
+Per la tabella variabili e i valori concreti, vedere `docs/environments-setup.md`.
 
 ```
-C:\Users\Roberto\
+C:\Users\%USERNAME%\
 ├── miniconda3\                    ← Python "base" per l'Orchestratore
 │   └── python.exe                 (pystray, redis, PIL — niente AI)
 └── aria\envs\
-    ├── dias-sound-engine\         ← ★ Env unificato sound: ACE-Step + AudioGen + MusicGen + Demucs
-    ├── fish-speech-env\           ← Python 3.10 + fish-speech + VQGAN
-    ├── qwen3tts\                  ← Python 3.12 + Qwen3-TTS 1.7B
-    ├── nh-qwen35-llm\             ← Python 3.11 + llama.cpp (Qwen3.5 35B MoE)
-    ├── aria-cloud\                ← Python 3.12 + Google GenAI SDK
-    └── sox\                       ← SoX audio tool
+    ├── qwen3tts\                  ← Python 3.12 + PyTorch + qwen-tts
+    │   └── python.exe
+    └── fish-speech-env\           ← Python 3.10 + PyTorch + fish-speech (da ricreare)
+        └── python.exe
 ```
 
-| Ambiente | Python | PyTorch | Porta | Stato | VRAM |
-|---|---|---|---|---|---|
-| Orchestratore (`miniconda3`) | 3.12 | — | — | ✅ Operativo | — |
-| `fish-speech-env` | 3.10 | 2.7+cu128 | 8080/8081 | ✅ Operativo | ~3-4 GB |
-| `qwen3tts` | 3.12 | 2.6+cu124 | 8083 | ✅ Operativo | ~4-5 GB |
-| `dias-sound-engine` | 3.11 | 2.11.0+cu128 | 8084 / 8086 | ✅ Operativo | 8-14 GB |
-| `nh-qwen35-llm` | 3.11 | — (llama.cpp) | 8085 | ✅ Operativo | ~13-14 GB |
-| `aria-cloud` | 3.12 | — | — | ✅ Operativo | — |
-| `audiocraft-env` | 3.11 | 2.11.0+cu128 | — | ⛔ Deprecato | — |
-
-> **`dias-sound-engine`** è l'ambiente unificato per tutti i modelli audio: ospita il wrapper ACE-Step (porta 8084), il wrapper Audiocraft (porta 8086), e la libreria Demucs per la separazione stem. I due wrapper sono processi distinti avviati JIT su richiesta.
+| Ambiente | Path | Python | Backend | Porta | Stato | VRAM |
+|---|---|---|---|---|---|---|
+| Orchestratore | `miniconda3\` | 3.12 | main_tray.py | — | 🔄 Da installare | — |
+| Qwen3-TTS | `aria\envs\qwen3tts\` | 3.12 | qwen3_server.py | 8083 | ✅ Operativo | ~4-5 GB |
+| Fish S1-mini | `aria\envs\fish-speech-env\` | 3.10 | tools/api_server.py | 8080 | 🔄 Da ricreare | ~3-4 GB |
+| Voice Cloning | `aria\envs\fish-speech-env\` | 3.10 | voice_cloning_server.py | 8081 | 🔄 Da ricreare | CPU |
+| LLM (futuro) | `aria\envs\llm\` | 3.11 | llm_server.py | 8085 | 🔲 In sviluppo | ~5 GB |
 
 ### Tabella Backend per Tipo
 
-| model_type | model_id | Backend Class | Ambiente | Documento | Porta | Stato |
-|---|---|---|---|---|---|---|
-| `tts` | `qwen3-tts-1.7b` | `Qwen3TTSBackend` | `envs/qwen3tts` | [qwen3-tts.md](backends/qwen3-tts.md) | 8083 | ✅ |
-| `tts` | `fish-s1-mini` | (HTTP companion) | `envs/fish-speech-env` | [fish-s1-mini.md](backends/fish-s1-mini.md) | 8080 | ✅ |
-| `tts` | `voice-cloning` | (companion Fish) | `envs/fish-speech-env` | [fish-s1-mini.md](backends/fish-s1-mini.md) | 8081 | ✅ |
-| `mus` | `acestep-1.5-xl-sft` | `ACEStepBackend` | `envs/dias-sound-engine` | [acestep-payload-strategy.md](backends/acestep-payload-strategy.md) | 8084 | ✅ |
-| `mus` | `audiocraft-medium` | `AudiocraftBackend` | `envs/dias-sound-engine` | [audiocraft-backend.md](backends/audiocraft-backend.md) | 8086 | ✅ |
-| `llm` | `qwen3.5-35b-moe-q3ks` | `Qwen35LLMBackend` | `envs/nh-qwen35-llm` | [qwen35-llm-moe.md](backends/qwen35-llm-moe.md) | 8085 | ✅ |
-| `llm` | `cloud-gemini` | `CloudManager` | `envs/aria-cloud` | — | — | ✅ (fallback) |
+| model_type | model_id | Backend Class | Ambiente | Documento | Stato |
+|---|---|---|---|---|---|
+| `tts` | `qwen3-tts-1.7b` | `Qwen3TTSBackend` | `envs/qwen3tts` | `docs/qwen3-tts-backend.md` | ✅ |
+| `tts` | `fish-s1-mini` | `FishTTSBackend` | `envs/fish-speech-env` | `docs/fish-tts-backend.md` | 🔄 |
+| `tts` | `voice-cloning` | (companion Fish) | `envs/fish-speech-env` | `docs/fish-tts-backend.md` | 🔄 |
+| `llm` | `llama-3.1-8b` | `LLMBackend` | `envs/llm` | `docs/llm-backend.md` | 🔲 |
+| `music` | `musicgen-small` | — | da creare | — | 🔲 Futuro |
+| `stt` | `whisper-large-v3` | — | da creare | — | 🔲 Futuro |
 
 ### Pattern comune a tutti i backend
 
-Tutti i backend seguono il pattern **External HTTP Backend** con **avvio on-demand (JIT)**:
+Tutti i backend seguono il pattern **External HTTP Backend** con **avvio on-demand**:
 - Processo Python standalone nel suo ambiente project-local
-- Avviato dall'Orchestratore (`ModelProcessManager`) quando arriva il primo task
-- Espone un'API HTTP su una porta dedicata con `/health` endpoint
-- Spento automaticamente dopo periodo di inattività configurabile
-- Finestra CMD visibile con log in tempo reale
+- Avviato dall'Orchestratore (`ModelProcessManager`) quando arriva un task
+- Espone un'API HTTP su una porta dedicata
+- Spento automaticamente dopo 45 min di inattività (`IDLE_TIMEOUT_S`)
+- Apre una finestra CMD visibile con log in tempo reale
 
-#### 4.1.3 Cloud Hybrid Gateway (Google Gemini)
-ARIA implementa una logica di "Cloud Worker" per gestire modelli non locali (es. Gemini Flash).
-- **Controller**: `CloudManager` (thread background nell'Orchestratore).
-- **Ambiente Isolato**: `%ARIA_ROOT%\envs\aria-cloud\` (Contiene Google GenAI SDK).
-- **Worker Process**: `aria_node_controller/backends/cloud/gemini_worker.py`.
-- **Comportamento**: Il gestore monitora le code `aria:q:cloud:*` e lancia il worker in un processo Python separato puntando all'ambiente isolato per evitare conflitti di librerie con l'orchestratore locale.
+L'eccezione sono i backend futuri basati su `diffusers` (image) che potrebbero
+essere integrati direttamente nel Node Controller se l'ambiente conda lo permette.
 
 ---
 
@@ -507,35 +442,16 @@ solo per campioni temporanei "one-shot" non presenti in libreria.*
 ```
 
 **LLM Testuale (model_type: llm)**:
-ARIA può risolvere il modello locale (Qwen 3.5) o il provider Cloud (Gemini).
+ARIA può risolvere il modello e il sistema di prompt tramite un ID intento.
 
-**Esempio Qwen Locale (Off-line Reasoning)**:
 ```json
 {
-  "model_id": "qwen3.5-35b-moe-q3ks",
-  "payload": {
-    "intent": "scene_director",
-    "messages": [
-      {"role": "user", "content": "Testo del capitolo..."}
-    ],
-    "max_tokens": 1000,
-    "temperature": 0.2
-  }
-}
-```
-
-**Esempio Gemini Cloud (Hybrid Gateway)**:
-```json
-{
-  "model_id": "gemini-flash-lite",
-  "provider": "google",
-  "payload": {
-    "text": "Analisi rapida di questo testo.",
-    "config": {
-       "temperature": 0.7,
-       "response_mime_type": "application/json"
-    }
-  }
+  "intent": "scene_director",    // Resolves to specific model and system prompt
+  "messages": [
+    {"role": "user", "content": "Testo del capitolo da analizzare..."}
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.2
 }
 ```
 

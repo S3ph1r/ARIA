@@ -20,18 +20,49 @@ import re
 from .models import AriaTaskResult
 from .registry_manager import AriaRegistryManager
 
+class AriaAssetHandler(http.server.SimpleHTTPRequestHandler):
+    """
+    Handler personalizzato per ARIA. 
+    Gestisce il routing logico dei file statici su porta 8082.
+    """
+    def translate_path(self, path):
+        # Rimuove il primo '/'
+        clean_path = path[1:]
+        
+        # 1. Routing verso gli Assets (Anteprime Vocali)
+        if clean_path.startswith("assets/"):
+            return str(ARIA_ROOT / "data" / clean_path)
+            
+        # 2. Routing verso gli Outputs (File generati)
+        if clean_path.startswith("outputs/"):
+            return str(ARIA_ROOT / "data" / clean_path)
+            
+        # 3. COMPATIBILITÀ LEGACY: Se non c'è prefisso, assumiamo sia un output
+        # Questo serve per DIAS Stage D (versioni precedenti a v6.5)
+        return str(ARIA_ROOT / "data" / "outputs" / clean_path)
+
 # Backends
 try:
     from backends.qwen3_tts import Qwen3TTSBackend
     from backends.qwen35_llm import Qwen35LLMBackend
+    from backends.acestep import ACEStepBackend
+    from backends.audiocraft import AudiocraftBackend
     _BACKENDS_AVAILABLE = True
+    HAS_ACESTEP = True
+    HAS_AUDIOCRAFT = True
 except ImportError:
     try:
         from ..backends.qwen3_tts import Qwen3TTSBackend
         from ..backends.qwen35_llm import Qwen35LLMBackend
+        from ..backends.acestep import ACEStepBackend
+        from ..backends.audiocraft import AudiocraftBackend
         _BACKENDS_AVAILABLE = True
+        HAS_ACESTEP = True
+        HAS_AUDIOCRAFT = True
     except ImportError:
         _BACKENDS_AVAILABLE = False
+        HAS_ACESTEP = False
+        HAS_AUDIOCRAFT = False
 
 
 logger = get_logger("node.orchestrator")
@@ -222,6 +253,16 @@ class ModelProcessManager:
                 cmd = self._build_cmd(model_id)
                 logger.info(f"Avvio backend {model_id} in finestra Console dedicata...")
                 
+                # Risoluzione working_dir dal manifest (es. 'backends/acestep')
+                # Se presente, viene usato come CWD del processo e aggiunto a PYTHONPATH
+                # così il package locale (es. 'acestep') è importabile senza installazione.
+                cfg = self.MODEL_CONFIGS.get(model_id, {})
+                working_dir_rel = cfg.get("working_dir")
+                if working_dir_rel:
+                    process_cwd = str(self.aria_root / working_dir_rel)
+                else:
+                    process_cwd = str(self.aria_root)
+
                 if os.name == 'nt':
                     # Magic CMD escape bug: Se usiamo 'start' con 'cmd /k', dobbiamo stare attenti a come passiamo la stringa.
                     # Il modo più sicuro è NON quotare l'intera cmd_str se i singoli pezzi sono già quotati, 
@@ -236,6 +277,22 @@ class ModelProcessManager:
                         env["PATH"] = sox_path + os.pathsep + env.get("PATH", "")
                         logger.info(f"Injected SoX path: {sox_path}")
 
+                    # Iniezione PYTHONPATH con working_dir per package locali
+                    if working_dir_rel:
+                        env["PYTHONPATH"] = process_cwd + os.pathsep + env.get("PYTHONPATH", "")
+                        logger.info(f"Working dir → {process_cwd} (aggiunto a PYTHONPATH)")
+
+                    # Iniezione variabili d'ambiente custom dal manifest
+                    custom_env = cfg.get("env", {})
+                    if custom_env:
+                        for k, v in custom_env.items():
+                            env[k] = str(v)
+                            logger.info(f"Custom Env: {k}={v}")
+
+                    # Blocca download HuggingFace: i modelli sono già disponibili via junction NTFS
+                    env["HF_HUB_OFFLINE"] = "1"
+                    env["TRANSFORMERS_OFFLINE"] = "1"
+
                     # Su Windows, Popen con shell=True e 'start' vuole una stringa dove:
                     # 1. 'start' vuole il titolo tra virgolette
                     # 2. 'cmd /k' vuole il comando. Se il comando ha spazi/quote, meglio non wrapparlo 
@@ -243,7 +300,7 @@ class ModelProcessManager:
                     new_proc = subprocess.Popen(
                         f'start "{title}" cmd.exe /k {cmd_str}',
                         shell=True,
-                        cwd=str(self.aria_root),
+                        cwd=process_cwd,
                         env=env
                     )
                 else:
@@ -253,11 +310,16 @@ class ModelProcessManager:
                     log_out = open(log_dir / f"startup_{model_id.replace('-','_')}.log", "a")
                     log_err = open(log_dir / f"startup_{model_id.replace('-','_')}_err.log", "a")
 
+                    env = os.environ.copy()
+                    if working_dir_rel:
+                        env["PYTHONPATH"] = process_cwd + os.pathsep + env.get("PYTHONPATH", "")
+
                     new_proc = subprocess.Popen(
                         cmd,
                         stdout=log_out,
                         stderr=log_err,
-                        cwd=str(self.aria_root),
+                        cwd=process_cwd,
+                        env=env,
                     )
                     
                 self._procs[model_id] = new_proc
@@ -374,6 +436,8 @@ class NodeOrchestrator:
         # Backend lazy instances
         self._qwen3_backend = Qwen3TTSBackend() if _BACKENDS_AVAILABLE else None
         self._qwen35_backend = Qwen35LLMBackend() if _BACKENDS_AVAILABLE else None
+        self._acestep_backend    = ACEStepBackend() if HAS_ACESTEP else None
+        self._audiocraft_backend = AudiocraftBackend() if HAS_AUDIOCRAFT else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
@@ -390,25 +454,22 @@ class NodeOrchestrator:
             rate_limiter=self.rate_limiter
         )
 
-        # Registry Manager — Discovery v1.0
         self.registry = AriaRegistryManager(
             aria_root=ARIA_ROOT,
-            redis_client=redis_client
+            redis_client=redis_client,
+            local_ip=self.local_ip
         )
 
-        
     def _start_http_server(self):
-        """Avvia l'Asset Server HTTP nativo per file statici su C:/Users/Roberto/aria/data/outputs"""
+        """Avvia l'Asset Server HTTP nativo per file statici su C:/Users/Roberto/aria/data"""
         os.makedirs(ARIA_OUTPUT_DIR, exist_ok=True)
-        # Cambia working directory per il SimpleHTTPRequestHandler
-        os.chdir(ARIA_OUTPUT_DIR)
         
-        Handler = http.server.SimpleHTTPRequestHandler
+        Handler = AriaAssetHandler
         # Per permettere restart puliti anche in caso di crash
         socketserver.TCPServer.allow_reuse_address = True
         
         with socketserver.TCPServer(("0.0.0.0", HTTP_PORT), Handler) as httpd:
-            logger.info(f"Asset Server HTTP avviato su {self.local_ip}:{HTTP_PORT} (Serving {ARIA_OUTPUT_DIR})")
+            logger.info(f"Asset Server HTTP avviato su {self.local_ip}:{HTTP_PORT} (Serving ARIA_ROOT/data)")
             while self.running:
                 httpd.handle_request()
 
@@ -493,7 +554,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "acestep-1.5-xl-sft"]
         current_model = None
         
         last_heartbeat = 0
@@ -624,6 +685,10 @@ class NodeOrchestrator:
 
         if task.model_id.startswith("qwen3-tts"):
             self._process_qwen3_task(task, start_t)
+        elif task.model_id == "audiocraft-medium":
+            self._process_audiocraft_task(task, start_t)
+        elif task.model_id == "acestep-1.5-xl-sft" or task.model_type == "mus":
+            self._process_acestep_task(task, start_t)
         elif task.model_id == "qwen3.5-35b-moe-q3ks":
             self._process_llm_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
@@ -778,7 +843,7 @@ class NodeOrchestrator:
                 logger.info(f"Wrote generated WAV to {local_out_path}")
                 
                 # Ritorna l'URL HTTP Pubblico al Container LXC / Client
-                public_url = f"http://{self.local_ip}:{HTTP_PORT}/{filename}"
+                public_url = f"http://{self.local_ip}:{HTTP_PORT}/outputs/{filename}"
 
                 result = AriaTaskResult(
                     job_id=task.job_id,
@@ -943,3 +1008,99 @@ class NodeOrchestrator:
                     w_out.writeframes(b'\x00' * (num_frames * bytes_per_frame))
                     
         return out_buf.getvalue()
+    def _process_acestep_task(self, task, start_t: float):
+        """Dispatch di un task MUS verso ACEStepBackend (Dias Sound Engine)."""
+        if not self._acestep_backend:
+            raise RuntimeError("ACEStepBackend non disponibile (import fallito).")
+        
+        # Gestione JIT: assicura che il server musicale sia attivo
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend musicale per {task.model_id}")
+
+        try:
+            result_data = self._acestep_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip
+            )
+            duration_s = time.time() - start_t
+
+            output: dict = {
+                "audio_url":        result_data.get("audio_url"),
+                "duration_seconds": result_data.get("duration_seconds"),
+            }
+            # Stem URLs presenti solo se run_demucs=True e HTDemucs ha avuto successo
+            if result_data.get("stems"):
+                output["stems"] = result_data["stems"]
+
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output=output,
+            )
+            self.qm.post_result(task, result)
+            logger.info(
+                f"Music Task Completed: {task.job_id}"
+                + (f" | stems: {list(result_data['stems'].keys())}" if result_data.get("stems") else "")
+            )
+            
+        except Exception as e:
+            logger.error(f"Music Task Failed: {e}", exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e)
+            )
+            self.qm.post_result(task, result)
+
+    def _process_audiocraft_task(self, task, start_t: float):
+        """Dispatch di un task AMB/SFX/STING verso AudiocraftBackend."""
+        if not self._audiocraft_backend:
+            raise RuntimeError("AudiocraftBackend non disponibile.")
+
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend Audiocraft ({task.model_id})")
+
+        try:
+            result_data = self._audiocraft_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip,
+            )
+            duration_s = time.time() - start_t
+
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output={
+                    "audio_url":        result_data.get("audio_url"),
+                    "duration_seconds": result_data.get("duration_seconds"),
+                },
+            )
+            self.qm.post_result(task, result)
+            logger.info(f"Audiocraft Task Completed: {task.job_id}")
+
+        except Exception as e:
+            logger.error(f"Audiocraft Task Failed: {e}", exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e),
+            )
+            self.qm.post_result(task, result)

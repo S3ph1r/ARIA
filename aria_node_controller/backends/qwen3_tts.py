@@ -1,5 +1,5 @@
-"""
-ARIA — Backend Qwen3-TTS 1.7B
+﻿"""
+ARIA ÔÇö Backend Qwen3-TTS 1.7B
 ======================================
 Segue il pattern External HTTP Backend. 
 Supporta varianti multiple (Base, CustomVoice) tramite model_id.
@@ -55,7 +55,7 @@ class Qwen3TTSBackend:
             raise RuntimeError(f"Health check Qwen3 fallito: {e}")
 
     def unload(self) -> None:
-        """No-op — il server è un processo esterno gestito dal bat/Task Scheduler."""
+        """No-op ÔÇö il server ├¿ un processo esterno gestito dal bat/Task Scheduler."""
         logger.info("Qwen3-TTS backend: unload (no-op, processo esterno)")
 
     def estimated_vram_gb(self) -> float:
@@ -86,7 +86,7 @@ class Qwen3TTSBackend:
         if not text:
             raise ValueError("Campo 'text' obbligatorio nel payload Qwen3-TTS")
 
-        # ── Risoluzione voice ref ──────────────────────────────────────────
+        # ÔöÇÔöÇ Risoluzione voice ref ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
         voice_id = payload.get("voice_id")
         voice_ref_path_str = payload.get("voice_ref_audio_path")
 
@@ -105,17 +105,28 @@ class Qwen3TTSBackend:
             
             if ref_padded.exists():
                 voice_ref_path_str = str(ref_padded)
-                logger.info(f"Resolved voice '{voice_id}' → {voice_ref_path_str}")
+                logger.info(f"Resolved voice '{voice_id}' ÔåÆ {voice_ref_path_str}")
             elif ref_plain.exists():
                 voice_ref_path_str = str(ref_plain)
                 logger.warning(
                     f"ref_padded.wav non trovato per '{voice_id}' in {voice_dir}, uso ref.wav "
-                    "(esegui create_padded_ref.py per migliorare la qualità)"
+                    "(esegui create_padded_ref.py per migliorare la qualit├á)"
                 )
             else:
                 logger.info(f"Ricevuto voice_id='{voice_id}' ma nessun ref.wav trovato in {voice_dir}. Procedo (ok se CustomVoice).")
+            
+            # --- AUTO-RESOLUTION OF REF TEXT (Standard Discovery v1.0) ---
+            if not payload.get("voice_ref_text"):
+                ref_text_path = voice_dir / "ref.txt"
+                if ref_text_path.exists():
+                    try:
+                        with open(ref_text_path, 'r', encoding='utf-8') as f:
+                            payload["voice_ref_text"] = f.read().strip()
+                        logger.info(f"Resolved voice_ref_text from {ref_text_path} ({len(payload['voice_ref_text'])} chars)")
+                    except Exception as e:
+                        logger.error(f"Fallito caricamento ref.txt in {voice_dir}: {e}")
 
-        # ── Parametri ────────────────────────────────────────────────────────
+        # ÔöÇÔöÇ Parametri ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
         job_id          = payload.get("job_id") or payload.get("unique_aria_job_id") or str(uuid.uuid4())
         output_filename = f"{job_id}.wav"
         logger.info(f"Target output filename: {output_filename}")
@@ -135,7 +146,7 @@ class Qwen3TTSBackend:
             instruct = f"{instruct} Character notes: {dialogue_notes}"
             logger.info(f"Enriched instruct with dialogue_notes: {dialogue_notes[:60]}...")
 
-        # ── Chiamata al server ───────────────────────────────────────────────
+        # ÔöÇÔöÇ Chiamata al server ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
         request_body = {
             "text":                   text,
             "voice_id":               voice_id,
@@ -173,14 +184,14 @@ class Qwen3TTSBackend:
             response.raise_for_status()
             result = response.json()
         except requests.exceptions.Timeout:
-            raise RuntimeError(f"Timeout ({timeout}s) durante inferenza Qwen3-TTS — job={job_id}")
+            raise RuntimeError(f"Timeout ({timeout}s) durante inferenza Qwen3-TTS ÔÇö job={job_id}")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Errore chiamata Qwen3-TTS server: {e}")
 
-        # ── Costruisce audio_url pubblica ────────────────────────────────────
+        # ÔöÇÔöÇ Costruisce audio_url pubblica ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
         # Il server qwen3 serve gli output su /outputs/{filename}
-        # ma il porto pubblico è l'asset server ARIA (porta 8082), che serve
-        # la stessa OUTPUT_DIR. Usiamo il porto 8082 per uniformità con Fish.
+        # ma il porto pubblico ├¿ l'asset server ARIA (porta 8082), che serve
+        # la stessa OUTPUT_DIR. Usiamo il porto 8082 per uniformit├á con Fish.
         audio_url = f"http://{local_ip}:8082/{output_filename}"
 
         logger.info(
@@ -203,9 +214,9 @@ class Qwen3TTSBackend:
         }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Mappa emozione → instruct (fallback statico)
-# ──────────────────────────────────────────────────────────────────────────────
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# Mappa emozione ÔåÆ instruct (fallback statico)
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 _EMOTION_TO_INSTRUCT = {
     "neutral":   "Warm male voice, Italian audiobook narrator, calm and measured, moderate pace.",
     "neutro":    "Warm male voice, Italian audiobook narrator, calm and measured, moderate pace.",

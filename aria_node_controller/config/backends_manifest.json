@@ -3,7 +3,7 @@
     "fish-s1-mini": {
       "metadata": {
         "display_name": "Fish Speech S1-mini",
-        "description": "Modello TTS ad alta espressivitÃƒÂ  con supporto cloning e emotion-markers.",
+        "description": "Modello TTS ad alta espressivita con supporto cloning e emotion-markers.",
         "capabilities": ["tts", "voice-cloning", "emotion-tagging"]
       },
       "port": 8080,
@@ -45,7 +45,7 @@
       "startup_wait": 240,
       "env_prefix": "envs/qwen3tts",
       "template": "envs/templates/qwen3-tts.yml",
-      "script": "aria_node_controller/qwen3_server.py",
+      "script": "backends/qwen3tts/server.py",
       "args": [
         "--model-path", "data/assets/models/qwen3-tts-1.7b",
         "--port", "8083"
@@ -61,7 +61,7 @@
       "health_url": "http://localhost:8085/v1/health",
       "startup_wait": 300,
       "env_prefix": "envs/nh-qwen35-llm",
-      "script": "aria_node_controller/llm_server.py"
+      "script": "backends/llm/server.py"
     },
     "sox": {
       "metadata": {
@@ -71,7 +71,40 @@
       },
       "env_prefix": "envs/sox",
       "conda_pkg": "sox -c conda-forge"
+    },
+    "acestep-1.5-xl-sft": {
+      "metadata": {
+        "display_name": "ACE-Step 1.5 XL (SFT)",
+        "description": "Motore musicale JIT. Wrapper persistente che lancia cli.py+TOML per ogni task. Produce WAV + .score.json nel Warehouse.",
+        "capabilities": ["music-generation", "sfx-generation", "audio-codes"]
+      },
+      "port": 8084,
+      "health_url": "http://localhost:8084/health",
+      "startup_wait": 15,
+      "env_prefix": "envs/dias-sound-engine",
+      "working_dir": "backends/acestep",
+      "script": "backends/acestep/aria_wrapper_server.py",
+      "args": [
+        "--host", "127.0.0.1",
+        "--port", "8084"
+      ]
+    },
+    "audiocraft-medium": {
+      "metadata": {
+        "display_name": "Audiocraft (AudioGen + MusicGen)",
+        "description": "Wrapper JIT per AudioGen (amb/sfx) e MusicGen (sting). Routing interno per output_style.",
+        "capabilities": ["sound-effects", "ambient-generation", "sting-generation"]
+      },
+      "port": 8086,
+      "health_url": "http://localhost:8086/health",
+      "startup_wait": 30,
+      "env_prefix": "envs/dias-sound-engine",
+      "working_dir": "backends/audiocraft",
+      "script": "backends/audiocraft/aria_audiocraft_server.py",
+      "args": [
+        "--host", "127.0.0.1",
+        "--port", "8086"
+      ]
     }
   }
 }
-
