@@ -89,8 +89,10 @@ class ACEStepBackend:
         # HTDemucs scrive in: {stems_dir}/htdemucs_6s/{master_name}/{stem}.wav
         # Non usiamo --filename: non disponibile in tutte le versioni di demucs.
         # I file vengono trovati e spostati in posizione flat dal codice sotto.
+        # run_demucs.py patcha torchaudio.load → soundfile (torchcodec non installato).
+        _run_demucs_script = aria_root / "backends" / "acestep" / "run_demucs.py"
         cmd = [
-            str(python_exe), "-m", "demucs",
+            str(python_exe), str(_run_demucs_script),
             "-n", "htdemucs_6s",
             "-o", str(stems_dir),
             str(master_path),

@@ -106,7 +106,8 @@ def _run_task(req: GenerateRequest) -> GenerateResponse:
         out_dir  = ARIA_ROOT / "data" / "assets" / "sound_library" / style / job_id
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{job_id}.wav"
-        torchaudio.save(str(out_path), wav, OUTPUT_SR)
+        import soundfile as _sf
+        _sf.write(str(out_path), wav.T.numpy(), OUTPUT_SR, subtype="PCM_16")
 
         duration_s = wav.shape[-1] / OUTPUT_SR
 

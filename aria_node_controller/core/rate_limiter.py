@@ -27,7 +27,7 @@ class GeminiRateLimiter:
         redis_client: redis.Redis,
         min_delay_seconds: int = 60, 
         lockout_minutes: int = 10, 
-        daily_limit: int = 100
+        daily_limit: int = 200
     ):
         self.redis = redis_client
         self.min_delay = timedelta(seconds=min_delay_seconds)

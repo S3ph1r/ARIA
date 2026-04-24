@@ -179,4 +179,9 @@ class CloudManager:
 
         # Post result
         self.qm.post_result(task, result)
+        
+        # Pacing cooldown (ensure 1 min of silence after response)
+        logger.info(f"Cloud task {task.job_id} completed. Cooling down for 60s...")
+        time.sleep(60)
+        
         logger.info(f"Cloud task {task.job_id} completed with status: {result.status}")
