@@ -72,7 +72,7 @@ def setup_logging(log_level_name: str = "INFO", console_only: bool = False):
         structlog.stdlib.add_logger_name,                 # Add "logger" field
         structlog.stdlib.add_log_level,                   # Add "level" field
         structlog.stdlib.PositionalArgumentsFormatter(),  # % formatting
-        structlog.processors.TimeStamper(fmt="iso"),      # Add "timestamp"
+        structlog.processors.TimeStamper(fmt="iso", utc=False),  # Add "timestamp" in local timezone (Europe/Rome)
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,             # Unpack exception info
         structlog.stdlib.ProcessorFormatter.wrap_for_formatter, # Let stdlib deal with outputs
