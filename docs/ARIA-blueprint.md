@@ -27,6 +27,7 @@
 12. [Configurazione](#12-configurazione)
 13. [Sicurezza](#13-sicurezza)
 14. [Limiti e Vincoli Noti](#14-limiti-e-vincoli-noti)
+16. [Telemetria Locale](#16-telemetria-locale)
 
 ---
 
@@ -85,8 +86,10 @@ Ogni tipo di modello ha un backend Python. L'interfaccia è identica per tutti:
 modello significa scrivere un nuovo backend — niente altro cambia.
 
 **6. Privacy totale**
-Nessun dato lascia la rete locale. Nessun log remoto. Nessuna telemetria.
-Il codice è open source e ispezionabile.
+Nessun dato lascia la rete locale. Nessun log remoto. Nessun dato inviato a terze parti.
+ARIA registra una telemetria **locale** in SQLite (`logs/aria-telemetry.db`) per monitoraggio
+delle performance e analisi degli errori — i dati restano sul nodo GPU.
+Il codice è open source e ispezionabile. Vedi [aria-telemetry.md](aria-telemetry.md).
 
 ---
 
@@ -1201,3 +1204,31 @@ Gli asset pesanti e specifici del nodo **non sono in Git** per design. Devono es
 3. Esecuzione `aria-download.bat` per scaricare `fish-s1-mini`.
 4. Copia manuale (o via rete) della cartella `data/voices` se si desidera ereditare le voci esistenti.
 5. Avvio via `Avvia_Tutti_Server_ARIA.bat`.
+
+---
+
+## 16. Telemetria Locale
+
+A partire da Maggio 2026, ARIA registra una riga in SQLite per ogni task completato o fallito.
+
+### Cosa viene registrato
+
+Per ogni task: `job_id`, `client_id`, `model_id`, `provider`, tempo in coda (`queue_wait_s`),
+tempo di inferenza (`processing_s`), `status`, `error_code`.
+
+Metriche aggiuntive per backend:
+- **TTS/MUS**: durata audio (`audio_duration_s`)
+- **Qwen3**: Real-Time Factor (`rtf`), picco VRAM (`vram_peak_gb`)
+- **Gemini**: token input/output (`input_tokens`, `output_tokens`)
+
+### Dove si trova
+
+```
+C:\Users\roberto\aria\logs\aria-telemetry.db
+```
+
+Il file è interrogabile in tempo reale con DB Browser for SQLite o Python `sqlite3`
+senza fermare ARIA (WAL mode).
+
+Per la documentazione completa dello schema, query di esempio e garanzie di robustezza,
+vedi [aria-telemetry.md](aria-telemetry.md).
