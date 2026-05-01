@@ -19,24 +19,25 @@ from .logger import get_logger
 import re
 from .models import AriaTaskResult
 from .registry_manager import AriaRegistryManager
+from .telemetry import TelemetryDB
 
 class AriaAssetHandler(http.server.SimpleHTTPRequestHandler):
     """
-    Handler personalizzato per ARIA. 
+    Handler personalizzato per ARIA.
     Gestisce il routing logico dei file statici su porta 8082.
     """
     def translate_path(self, path):
         # Rimuove il primo '/'
         clean_path = path[1:]
-        
+
         # 1. Routing verso gli Assets (Anteprime Vocali)
         if clean_path.startswith("assets/"):
             return str(ARIA_ROOT / "data" / clean_path)
-            
+
         # 2. Routing verso gli Outputs (File generati)
         if clean_path.startswith("outputs/"):
             return str(ARIA_ROOT / "data" / clean_path)
-            
+
         # 3. COMPATIBILITÀ LEGACY: Se non c'è prefisso, assumiamo sia un output
         # Questo serve per DIAS Stage D (versioni precedenti a v6.5)
         return str(ARIA_ROOT / "data" / "outputs" / clean_path)
@@ -138,7 +139,7 @@ class ModelProcessManager:
         self._procs: dict[str, subprocess.Popen] = {}
         self._idle_since: dict[str, float]        = {}
         self._lock = threading.Lock()
-        
+
         # Caricamento Manifest dei Backend
         self.MODEL_CONFIGS = self._load_manifest()
 
@@ -222,7 +223,7 @@ class ModelProcessManager:
 
         with self._lock:
             # 0. Gestione Conflitti Porta (SOA v2.1)
-            # Se un ALTRO modello sta usando la stessa porta, dobbiamo killarlo 
+            # Se un ALTRO modello sta usando la stessa porta, dobbiamo killarlo
             # per liberare la GPU e il socket.
             target_port = self.MODEL_CONFIGS[model_id].get("port")
             if target_port:
@@ -252,7 +253,7 @@ class ModelProcessManager:
             try:
                 cmd = self._build_cmd(model_id)
                 logger.info(f"Avvio backend {model_id} in finestra Console dedicata...")
-                
+
                 # Risoluzione working_dir dal manifest (es. 'backends/acestep')
                 # Se presente, viene usato come CWD del processo e aggiunto a PYTHONPATH
                 # così il package locale (es. 'acestep') è importabile senza installazione.
@@ -265,11 +266,11 @@ class ModelProcessManager:
 
                 if os.name == 'nt':
                     # Magic CMD escape bug: Se usiamo 'start' con 'cmd /k', dobbiamo stare attenti a come passiamo la stringa.
-                    # Il modo più sicuro è NON quotare l'intera cmd_str se i singoli pezzi sono già quotati, 
+                    # Il modo più sicuro è NON quotare l'intera cmd_str se i singoli pezzi sono già quotati,
                     # oppure usare un trucco specifico di CMD se ci sono spazi.
                     cmd_str = " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
                     title = f"ARIA Backend: {model_id}"
-                    
+
                     # Iniezione PATH per SoX e altre dipendenze core
                     env = os.environ.copy()
                     sox_path = str(self.aria_root / "envs" / "sox" / "Library" / "bin")
@@ -295,7 +296,7 @@ class ModelProcessManager:
 
                     # Su Windows, Popen con shell=True e 'start' vuole una stringa dove:
                     # 1. 'start' vuole il titolo tra virgolette
-                    # 2. 'cmd /k' vuole il comando. Se il comando ha spazi/quote, meglio non wrapparlo 
+                    # 2. 'cmd /k' vuole il comando. Se il comando ha spazi/quote, meglio non wrapparlo
                     #    ulteriormente se i singoli pezzi sono già corretti.
                     new_proc = subprocess.Popen(
                         f'start "{title}" cmd.exe /k {cmd_str}',
@@ -321,7 +322,7 @@ class ModelProcessManager:
                         cwd=process_cwd,
                         env=env,
                     )
-                    
+
                 self._procs[model_id] = new_proc
                 self._idle_since.pop(model_id, None)
             except Exception as e:
@@ -363,7 +364,7 @@ class ModelProcessManager:
             proc = self._procs.get(model_id)
             if proc and proc.poll() is None:
                 logger.info(f"{model_id}: terminazione processo (idle timeout / shutdown).")
-                
+
                 if os.name == 'nt':
                     # Siccome abbiamo lanciato con 'start cmd', il Popen originale è solo
                     # l'esecutore 'start'. Dobbiamo killare l'albero processi reale dal titolo.
@@ -375,7 +376,7 @@ class ModelProcessManager:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        
+
                 logger.info(f"{model_id}: processo terminato.")
             self._procs.pop(model_id, None)
 
@@ -422,14 +423,16 @@ class NodeOrchestrator:
         self.aria_root = ARIA_ROOT
         logger.info(f"Node IP resolved to: {self.local_ip}")
         self.qm = AriaQueueManager(redis_client)
+        self.telemetry = TelemetryDB(ARIA_ROOT / "logs" / "aria-telemetry.db")
+        self.qm.telemetry = self.telemetry
         self.optimizer = BatchOptimizer(redis_client)
         self.running = False
         self.thread = None
         self.http_thread = None
-        
+
         # Semaforo locale copiato dalla Tray Icon
         self.semaphore_green = True
-        
+
         # Cache RAM per token cloni
         self.token_cache = {}
 
@@ -463,11 +466,11 @@ class NodeOrchestrator:
     def _start_http_server(self):
         """Avvia l'Asset Server HTTP nativo per file statici su C:/Users/Roberto/aria/data"""
         os.makedirs(ARIA_OUTPUT_DIR, exist_ok=True)
-        
+
         Handler = AriaAssetHandler
         # Per permettere restart puliti anche in caso di crash
         socketserver.TCPServer.allow_reuse_address = True
-        
+
         with socketserver.TCPServer(("0.0.0.0", HTTP_PORT), Handler) as httpd:
             logger.info(f"Asset Server HTTP avviato su {self.local_ip}:{HTTP_PORT} (Serving ARIA_ROOT/data)")
             while self.running:
@@ -476,19 +479,19 @@ class NodeOrchestrator:
     def start(self):
         if self.running: return
         self.running = True
-        
+
         # Avvia Backend Orchestrator
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        
+
         # Start Cloud Manager
         self.cloud_manager.start()
 
         # Publish Master Registry (Discovery)
         self.registry.publish()
-        
+
         logger.info("Orchestrator task loop and CloudManager started. Master Registry published.")
-        
+
         # Avvia HTTP Asset Server Parallelo
         self.http_thread = threading.Thread(target=self._start_http_server, daemon=True)
         self.http_thread.start()
@@ -516,21 +519,21 @@ class NodeOrchestrator:
     def _discover_voices(self) -> list:
         """Scansiona sia la nuova cartella data/assets/voices che la legacy data/voices."""
         voices = set()
-        
+
         # 1. Nuova gerarchia (Standard)
         asset_voices_dir = self.aria_root / "data" / "assets" / "voices"
         if asset_voices_dir.exists():
             for d in asset_voices_dir.iterdir():
                 if d.is_dir(): voices.add(d.name)
-        
+
         # 2. Vecchia gerarchia (Legacy)
         legacy_voices_dir = self.aria_root / "data" / "voices"
         if legacy_voices_dir.exists():
             for d in legacy_voices_dir.iterdir():
                 if d.is_dir(): voices.add(d.name)
-        
+
         return list(voices)
-        
+
         # Ogni sottocartella in data/voices/ è una voce
         return [d.name for d in voices_dir.iterdir() if d.is_dir()]
 
@@ -556,7 +559,7 @@ class NodeOrchestrator:
         # Base models known by the node
         model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "acestep-1.5-xl-sft"]
         current_model = None
-        
+
         last_heartbeat = 0
         while self.running:
             # 1. Discover all active LOCAL queues for these models
@@ -651,22 +654,22 @@ class NodeOrchestrator:
 
     def _process_task(self, task):
         start_t = time.time()
-        
+
         # --- Idempotency Check (SOA v2.1) ---
         # Determiniamo il nome file atteso per questo task
         if task.model_id == "fish-s1-mini":
             filename = f"{task.job_id}_scene-001.wav"
         else:
             filename = f"{task.job_id}.wav"
-            
+
         local_out_path = ARIA_OUTPUT_DIR / filename
-        
+
         if local_out_path.exists():
             logger.info(f"Idempotenza ARIA: File {filename} già presente. Salto inferenza.")
             duration_s = self._get_wav_duration(local_out_path)
             # Nota: Uniformiamo il porto del server asset (8082) per ogni tipo di output
             public_url = f"http://{self.local_ip}:{HTTP_PORT}/{filename}"
-            
+
             result = AriaTaskResult(
                 job_id=task.job_id,
                 client_id=task.client_id,
@@ -675,7 +678,7 @@ class NodeOrchestrator:
                 status="done",
                 processing_time_seconds=time.time() - start_t,
                 output={
-                    "audio_url": public_url, 
+                    "audio_url": public_url,
                     "duration_seconds": duration_s,
                     "cached": True
                 }
@@ -704,11 +707,11 @@ class NodeOrchestrator:
                     voice_dir = voice_library_dir / voice_id
                     ref_wav = voice_dir / "ref.wav"
                     ref_txt_file = voice_dir / "ref.txt"
-                    
+
                     if ref_wav.exists():
                         voice_local_path = str(ref_wav)
                         logger.info(f"Resolved intent '{voice_id}' to {voice_local_path}")
-                        
+
                         # Resolve prompt text if not provided
                         if not prompt_text and ref_txt_file.exists():
                             try:
@@ -721,7 +724,7 @@ class NodeOrchestrator:
                                     with open(ref_txt_file, "r", encoding="latin-1") as f:
                                         prompt_text = f.read().strip()
                                     logger.info(f"Read ref.txt using latin-1 fallback for '{voice_id}'")
-                                
+
                                 logger.info(f"Resolved reference text for '{voice_id}' from ref.txt")
                             except Exception as e:
                                 logger.error(f"Failed to read ref.txt for {voice_id}: {e}")
@@ -755,7 +758,7 @@ class NodeOrchestrator:
                     "top_p": task.payload.get("top_p", 0.8),  # Increased top_p for more prosody variation
                     "repetition_penalty": task.payload.get("repetition_penalty", 1.1)
                 }
-                
+
                 if tokens_bytes and wav_bytes_ref:
                     tokens_b64 = base64.b64encode(tokens_bytes).decode("utf-8")
                     # IMPORTANT: `audio` must be the original WAV bytes (not NPY tokens).
@@ -773,13 +776,13 @@ class NodeOrchestrator:
                     }]
 
                 full_text = task.payload.get("text", "")
-                
+
                 # --- Advanced Chunking & Silence Injection ---
                 # Strategy: split by (break), (long-break), and \n\n.
                 # Generate real WAV silence for pauses instead of relying on Fish TTL.
                 import re
                 raw_segments = re.split(r'(\(long-break\)|\(break\)|\n\n)', full_text)
-                
+
                 actions = []
                 for seg in raw_segments:
                     if seg == "(long-break)":
@@ -796,24 +799,24 @@ class NodeOrchestrator:
                             for w_i in range(0, len(words), 120):
                                 chunk_text = " ".join(words[w_i:w_i+120])
                                 actions.append({"type": "text", "content": chunk_text})
-                
+
                 logger.info(f"Text parsed into {len(actions)} sequential actions (speech + silence).")
-                
+
                 audio_parts = []
                 for i, action in enumerate(actions):
                     if action["type"] == "silence":
                         logger.info(f"Action {i+1}/{len(actions)}: Injecting silence {action['duration']}s")
                         audio_parts.append(float(action["duration"]))
-                    
+
                     elif action["type"] == "text":
                         chunk = action["content"]
                         logger.info(f"Action {i+1}/{len(actions)}: TTS chunk ({len(chunk.split())} words)")
                         chunk_data = base_data.copy()
-                        
+
                         # Prepend a sacrificial break to absorb the S1-mini first-word cutoff bug
                         safe_chunk = f"(break) {chunk}"
                         chunk_data["text"] = safe_chunk
-                        
+
                         # Diagnostic log for only the first text chunk
                         if not any(isinstance(p, bytes) for p in audio_parts):
                             log_data = chunk_data.copy()
@@ -828,20 +831,20 @@ class NodeOrchestrator:
                         resp = requests.post(f"{FISH_TTS_HOST}/v1/tts", json=chunk_data, timeout=900)
                         resp.raise_for_status()
                         audio_parts.append(resp.content)
-                
+
                 # Merge chunks and silence
                 audio_bytes = self._merge_wavs(audio_parts)
-                    
+
                 duration_s = time.time() - start_t
-                
+
                 # Salvataggio Asset Piatto nella HTTP Directory Locale
                 filename = f"{task.job_id}_scene-001.wav"
                 local_out_path = ARIA_OUTPUT_DIR / filename
-                
+
                 with open(local_out_path, "wb") as f:
                      f.write(audio_bytes)
                 logger.info(f"Wrote generated WAV to {local_out_path}")
-                
+
                 # Ritorna l'URL HTTP Pubblico al Container LXC / Client
                 public_url = f"http://{self.local_ip}:{HTTP_PORT}/outputs/{filename}"
 
@@ -855,7 +858,7 @@ class NodeOrchestrator:
                     output={"audio_url": public_url, "duration_seconds": duration_s} # Niente più "output_path" grezzo Unix
                 )
                 self.qm.post_result(task, result)
-            
+
             except Exception as e:
                 logger.error(f"Task Failed: {e}", exc_info=True)
                 result = AriaTaskResult(
@@ -885,7 +888,7 @@ class NodeOrchestrator:
         """Dispatch di un task TTS verso Qwen3TTSBackend."""
         if not self._qwen3_backend:
             raise RuntimeError("Qwen3TTSBackend non disponibile (import fallito).")
-        
+
         # Garantisce che il modello corretto sia in esecuzione (Gestione Swap JIT)
         if not self.process_manager.ensure_running(task.model_id):
             raise RuntimeError(f"Impossibile avviare il backend Qwen3 per {task.model_id}")
@@ -912,7 +915,7 @@ class NodeOrchestrator:
                     "audio_url":        result_data["audio_url"],
                     "duration_seconds": result_data.get("duration_seconds"),
                     "chunks_count":     result_data.get("chunks_count"),
-                    "rtf":              result_data.get("metrics", {}).get("rtf"),
+                    "metrics":          result_data.get("metrics", {}),
                 }
             )
             self.qm.post_result(task, result)
@@ -943,7 +946,7 @@ class NodeOrchestrator:
                 local_ip=self.local_ip
             )
             duration_s = time.time() - start_t
-            
+
             result = AriaTaskResult(
                 job_id=task.job_id,
                 client_id=task.client_id,
@@ -976,10 +979,10 @@ class NodeOrchestrator:
         """Merge wav chunks and inject silences. Assumes same format/samplerate from the first WAV part."""
         import wave
         import io
-        
+
         if not audio_parts:
             return b""
-            
+
         # Find the first real WAV to get params
         params = None
         for part in audio_parts:
@@ -987,15 +990,15 @@ class NodeOrchestrator:
                 with wave.open(io.BytesIO(part), 'rb') as w:
                     params = w.getparams()
                 break
-                
+
         if not params:
             # Only silences?
             return b""
-            
+
         out_buf = io.BytesIO()
         with wave.open(out_buf, 'wb') as w_out:
             w_out.setparams(params)
-            
+
             for part in audio_parts:
                 if isinstance(part, bytes):
                     with wave.open(io.BytesIO(part), 'rb') as w_in:
@@ -1006,13 +1009,13 @@ class NodeOrchestrator:
                     num_frames = int(params.framerate * part)
                     bytes_per_frame = params.nchannels * params.sampwidth
                     w_out.writeframes(b'\x00' * (num_frames * bytes_per_frame))
-                    
+
         return out_buf.getvalue()
     def _process_acestep_task(self, task, start_t: float):
         """Dispatch di un task MUS verso ACEStepBackend (Dias Sound Engine)."""
         if not self._acestep_backend:
             raise RuntimeError("ACEStepBackend non disponibile (import fallito).")
-        
+
         # Gestione JIT: assicura che il server musicale sia attivo
         if not self.process_manager.ensure_running(task.model_id):
             raise RuntimeError(f"Impossibile avviare il backend musicale per {task.model_id}")
@@ -1047,7 +1050,7 @@ class NodeOrchestrator:
                 f"Music Task Completed: {task.job_id}"
                 + (f" | stems: {list(result_data['stems'].keys())}" if result_data.get("stems") else "")
             )
-            
+
         except Exception as e:
             logger.error(f"Music Task Failed: {e}", exc_info=True)
             result = AriaTaskResult(

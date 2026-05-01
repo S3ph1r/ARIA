@@ -15,7 +15,7 @@ class AriaQueueManager:
     Handles fetching tasks from Redis queues and posting results,
     plus crash recovery and dead letter routing.
     """
-    
+
     # Internal prefixes (New Standard v1.0)
     PREFIX_PROCESSING = "aria:s:proc" # Status: Processing
     PREFIX_DEAD = "aria:q:dead"      # Queue: Dead letter
@@ -23,26 +23,27 @@ class AriaQueueManager:
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
+        self.telemetry = None  # Optional[TelemetryDB] — injected by orchestrator after init
         self.recover_crashed_tasks()
 
     def recover_crashed_tasks(self):
         """
-        Runs on startup. Finds any tasks stuck in processing 
+        Runs on startup. Finds any tasks stuck in processing
         (meaning ARIA crashed during them) and either requeues them
         or sends them to dead letter if retries exceeded.
         """
         count_requeued = 0
         count_dead = 0
-        
+
         for key in self.redis.scan_iter(match=f"{self.PREFIX_PROCESSING}:*"):
             task_json = self.redis.get(key)
             if not task_json:
                 continue
-                
+
             try:
                 task_data = json.loads(task_json)
                 task_data["retry_count"] = task_data.get("retry_count", 0) + 1
-                
+
                 job_id = task_data.get("job_id")
                 client_id = task_data.get("client_id")
                 model_type = task_data.get("model_type")
@@ -50,7 +51,7 @@ class AriaQueueManager:
                 model_id = task_data.get("model_id")
                 # New Standard: aria:q:{env}:{prov}:{model}:{client}
                 queue_key = f"aria:q:{model_type}:{provider}:{model_id}:{client_id}"
-                
+
                 # Circuit breaker check
                 if task_data["retry_count"] >= self.MAX_RETRIES:
                     dead_key = f"{self.PREFIX_DEAD}:{client_id}:{job_id}"
@@ -61,12 +62,12 @@ class AriaQueueManager:
                     logger.info(f"Re-queueing crashed task {job_id} to {queue_key} (retry {task_data['retry_count']})")
                     self.redis.lpush(queue_key, json.dumps(task_data))
                     count_requeued += 1
-                    
+
             except Exception as e:
                 logger.error(f"Failed to parse and recover processing key {key}: {e}")
             finally:
                 self.redis.delete(key) # Clear the processing lock
-                
+
         if count_requeued > 0 or count_dead > 0:
             logger.info(f"Crash recovery complete: {count_requeued} requeued, {count_dead} dead lettered.")
 
@@ -78,21 +79,21 @@ class AriaQueueManager:
         result = self.redis.brpop(queue_key, timeout=timeout)
         if not result:
             return None, None
-            
+
         _, raw_json_data = result
-        
+
         # Support both decode_responses=True|False
         if isinstance(raw_json_data, bytes):
             raw_json_str = raw_json_data.decode('utf-8')
         else:
             raw_json_str = raw_json_data
-        
+
         try:
             task = AriaTaskPayload.model_validate_json(raw_json_str)
             # Create visibility lock BEFORE returning
             self._lock_processing(task.job_id, raw_json_str, task.timeout_seconds)
             return raw_json_str, task
-            
+
         except ValidationError as e:
             logger.error(f"Invalid task payload received from {queue_key}: {e}")
             # Immediately send invalid tasks to dead letter as they'll never succeed
@@ -102,7 +103,7 @@ class AriaQueueManager:
                 job_id = task_data.get("job_id", "unknown")
             except:
                 client_id, job_id = "unknown", "unknown"
-                
+
             dead_key = f"{self.PREFIX_DEAD}:{client_id}:{job_id}"
             self.redis.lpush(dead_key, raw_json_str)
             return None, None
@@ -123,14 +124,18 @@ class AriaQueueManager:
         try:
             callback_key = task.callback_key
             result_json = result.model_dump_json()
-            
+
             # Use a pipeline to ensure LPUSH and EXPIRE happen together
             pipeline = self.redis.pipeline()
             pipeline.lpush(callback_key, result_json)
             pipeline.expire(callback_key, 86400) # Keep result available for 24h max
             pipeline.execute()
-            
+
             logger.info(f"Result for {task.job_id} posted to {callback_key}")
+
+            if self.telemetry:
+                self.telemetry.log(task, result)
+
         except Exception as e:
             logger.error(f"Failed to post result for {task.job_id}: {e}")
         finally:

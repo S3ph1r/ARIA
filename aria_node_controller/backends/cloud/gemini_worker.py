@@ -25,7 +25,7 @@ def main():
 
     try:
         task = json.loads(input_data)
-        
+
         # 1. Recupero API Key
         api_key = task.get("config", {}).get("api_key") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
@@ -56,14 +56,14 @@ def main():
         # 4. Esecuzione Chiamata (Logica basata sull'SDK rilevato)
         if MODERN_SDK:
             client = genai.Client(api_key=api_key)
-            
+
             gen_config_kwargs = {
                 "temperature": temperature,
                 "max_output_tokens": max_tokens
             }
             if response_mime_type:
                 gen_config_kwargs["response_mime_type"] = response_mime_type
-                
+
             response = client.models.generate_content(
                 model=model_name,
                 contents=contents,
@@ -71,6 +71,15 @@ def main():
             )
             response_text = response.text
             finish_reason = str(response.candidates[0].finish_reason) if response.candidates else "unknown"
+            try:
+                um = response.usage_metadata
+                usage = {
+                    "input_tokens": um.prompt_token_count,
+                    "output_tokens": um.candidates_token_count,
+                    "total_tokens": um.total_token_count,
+                }
+            except Exception:
+                usage = {}
         else:
             # Vecchia sintassi per compatibilità estrema
             genai.configure(api_key=api_key)
@@ -84,6 +93,15 @@ def main():
             )
             response_text = response.text
             finish_reason = str(response.candidates[0].finish_reason) if response.candidates else "unknown"
+            try:
+                um = response.usage_metadata
+                usage = {
+                    "input_tokens": um.prompt_token_count,
+                    "output_tokens": um.candidates_token_count,
+                    "total_tokens": um.total_token_count,
+                }
+            except Exception:
+                usage = {}
 
         # 5. Output Standardizzato
         result = {
@@ -92,7 +110,8 @@ def main():
                 "text": response_text,
                 "model_version": model_name,
                 "finish_reason": finish_reason
-            }
+            },
+            "usage": usage,
         }
         print(json.dumps(result))
 
@@ -106,7 +125,7 @@ def main():
         err_msg = str(e).lower()
         if "429" in err_msg or "exhausted" in err_msg:
             result["error_code"] = "QUOTA_EXHAUSTED"
-            
+
         print(json.dumps(result))
         sys.exit(0)
 

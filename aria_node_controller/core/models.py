@@ -51,4 +51,5 @@ class AriaTaskResult(BaseModel):
     error: Optional[str] = Field(default=None)
     error_code: Optional[str] = Field(default=None, description="e.g., OOM, 429, INFERENCE_FAILED")
     retry_count: int = Field(default=0)
+    usage: Optional[Dict[str, Any]] = Field(default=None, description="Token usage from cloud providers (input_tokens, output_tokens)")
     schema_version: str = Field(default="1.0")
