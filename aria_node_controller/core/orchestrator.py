@@ -42,6 +42,27 @@ class AriaAssetHandler(http.server.SimpleHTTPRequestHandler):
         # Questo serve per DIAS Stage D (versioni precedenti a v6.5)
         return str(ARIA_ROOT / "data" / "outputs" / clean_path)
 
+    def do_DELETE(self):
+        """Gestisce DELETE /filename — elimina un output WAV dopo download confermato da Stage D."""
+        import logging
+        _logger = logging.getLogger("aria.asset_server")
+        file_path = self.translate_path(self.path)
+        try:
+            os.remove(file_path)
+            _logger.info(f"Asset eliminato su richiesta Stage D: {file_path}")
+            self.send_response(200)
+            self.end_headers()
+        except FileNotFoundError:
+            self.send_response(404)
+            self.end_headers()
+        except Exception as e:
+            _logger.warning(f"DELETE fallito per {file_path}: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Sopprime log HTTP per ogni richiesta (troppo verboso)
+
 # Backends
 try:
     from backends.qwen3_tts import Qwen3TTSBackend
