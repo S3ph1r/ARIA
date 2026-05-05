@@ -3,7 +3,7 @@ IDENTITY:
   description: >
     Adaptive Resource for Inference and AI — Piattaforma di inferenza AI privata
     e distribuita per reti domestiche. Trasforma un PC con GPU in un servizio
-    di inferenza condiviso ("stampante di rete intelligente per AI").
+    di inferenza condiviso accessibile come API cloud privata sulla LAN.
   repo: locale (sviluppi/ARIA/)
   stack: Python 3.10+, Redis, pystray, customtkinter, Fish-Speech, PyTorch/CUDA
   blueprint: docs/ARIA-blueprint.md
@@ -62,12 +62,30 @@ COMPONENTS:
   - name: Fish Voice Cloning Backend
     type: server API esterno (subprocess)
     purpose: Encoding VQGAN per voice cloning da WAV reference.
+  - name: Qwen3-TTS Backend (backends/qwen3tts/server.py)
+    type: server FastAPI esterno (subprocess, porta 8083)
+    purpose: Sintesi vocale zero-shot con voice cloning ICL tramite Qwen3-TTS-1.7B-Base.
+  - name: Dashboard (aria_node_controller/dashboard/server.py)
+    type: server FastAPI (subprocess, porta 8089)
+    purpose: Monitoraggio real-time orchestratore, telemetria, code Redis, log.
 
 KNOWLEDGE_INDEX:
-  - docs/ARIA-blueprint.md                 # Architettura completa e specifiche
-  - docs/fish-tts-backend.md               # Dettagli backend Fish TTS
-  - docs/fish-tts-roadmap-checklist.md     # Checklist operativa Fish
-  - docs/aria-server-roadmap.md            # Roadmap ARIA Server (futuro)
+  entries:
+  - path: docs/ARIA-blueprint.md
+    doc_trigger: "cambio architetturale (nuovo backend, nuovo componente, modifica asset server, modifica protocollo Redis)"
+    lint_check: "file exists, size > 10KB"
+  - path: docs/aria-state-of-gaps.md
+    doc_trigger: "nuovo gap identificato, gap risolto o cambiato stato su ARIA"
+    lint_check: "file exists, non-empty, contains open or resolved gap entries"
+  - path: docs/ARIA-Service-Registry.md
+    doc_trigger: "nuovo servizio aggiunto o rimosso dal catalogo ARIA"
+    lint_check: "file exists, non-empty"
+  - path: docs/aria-telemetry.md
+    doc_trigger: "modifica al sistema di telemetria (schema, metriche, storage)"
+    lint_check: "file exists, non-empty"
+  - path: docs/dias-to-aria-integration-spec.md
+    doc_trigger: "modifica al protocollo di integrazione DIAS↔ARIA (payload, DELETE, callback)"
+    lint_check: "file exists, non-empty"
 
 CREDENTIALS:
   - redis.aria_password: password Redis per connessione a CT120 (gestita via settings_gui.py)
