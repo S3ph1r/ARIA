@@ -423,6 +423,24 @@ ARIA implementa una logica di "Cloud Worker" per gestire modelli non locali (es.
 - **Worker Process**: `aria_node_controller/backends/cloud/gemini_worker.py`.
 - **Comportamento**: Il gestore monitora le code `aria:q:cloud:*` e lancia il worker in un processo Python separato puntando all'ambiente isolato per evitare conflitti di librerie con l'orchestratore locale.
 
+#### 4.1.4 GeminiRateLimiter — Gestione Intelligente Quote API [2026-05-03]
+
+`aria_node_controller/core/rate_limiter.py` gestisce i tre limiti del free tier Google Gemini in modo indipendente dalle app client:
+
+| Limite | Valore | Meccanismo Redis |
+|--------|--------|-----------------|
+| **RPD** (Requests/Day) | 500 | Contatore `aria:rate_limit:google:daily_count:YYYY-MM-DD` |
+| **RPM** (Requests/Min) | 15 | Sorted set sliding window 60s `aria:rate_limit:google:rpm_window` |
+| **TPM** (Tokens/Min) | 250.000 | Sorted set sliding window 60s `aria:rate_limit:google:tpm_window` |
+
+**Lockout intelligente per tipo di errore 429:**
+- `429 RPD` (quota giornaliera): lockout fino al prossimo reset Google, calcolato in ore reali sulla timezone `America/Los_Angeles` (mezzanotte PDT/PST ≈ 09:00 IT in estate). Log: `"🚨 RPD esaurito. Ripresa fra Xh Ym (HH:MM IT)"`.
+- `429 RPM` (rate momentaneo): lockout breve 10 minuti come in precedenza.
+
+Il `CloudManager` distingue i due casi ispezionando il campo `quotaId` nel body dell'errore Google (`GenerateRequestsPerDayPerProjectPerModel` → RPD, altrimenti RPM).
+
+`record_usage(tokens)` viene chiamato dopo ogni task riuscito per aggiornare le sliding window RPM e TPM — dati esposti in tempo reale nella dashboard.
+
 ---
 
 ## 5. Schema Task — Specifiche Complete
