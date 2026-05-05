@@ -24,7 +24,7 @@ PORT = int(os.getenv("QWEN3_PORT", "8083"))
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="Qwen3-TTS Server", version="1.1.0")
+app = FastAPI(title="Qwen3-TTS Server", version="1.2.0")
 model = None
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -93,13 +93,13 @@ def ensure_padded_ref(ref_path: str) -> str:
         padded_path = ref_path
     else:
         padded_path = f"{base}_padded{ext}"
-        
+
     if os.path.exists(padded_path):
         return padded_path
-        
+
     if not os.path.exists(ref_path):
         raise FileNotFoundError(f"Il file voce originale non esiste: {ref_path}")
-        
+
     logger.info(f"Auto-Padding: sto creando dinamicamente {padded_path} aggiungendo 0.5s di silenzio...")
     try:
         # ffmpeg via subprocess
@@ -134,6 +134,9 @@ class TTSRequest(BaseModel):
     max_words_per_chunk: int = 250
     gap_between_chunks_ms: int = 80
     output_filename: str = "output.wav"
+    subtalker_temperature: float = 0.9
+    subtalker_top_k: int = 50
+    subtalker_top_p: float = 1.0
 
 
 @app.get("/health")
@@ -178,11 +181,11 @@ def synthesize(req: TTSRequest):
 
     for i, chunk_text_part in enumerate(chunks):
         logger.info(f"Chunk {i+1}/{len(chunks)}: elaborazione {len(chunk_text_part.split())} parole...")
-        
+
         # Saltiamo chunk vuoti
         if not chunk_text_part.strip():
             continue
-            
+
         try:
             wavs, sr = model.generate_voice_clone(
                 text=chunk_text_part,
@@ -196,6 +199,9 @@ def synthesize(req: TTSRequest):
                 temperature=req.temperature,
                 top_p=req.top_p,
                 repetition_penalty=req.repetition_penalty,
+                subtalker_temperature=req.subtalker_temperature,
+                subtalker_top_k=req.subtalker_top_k,
+                subtalker_top_p=req.subtalker_top_p,
             )
             output_sr = sr
             wav_chunks.append(wavs[0] if isinstance(wavs, list) else wavs)
