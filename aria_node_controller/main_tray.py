@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import subprocess
+import webbrowser
 import pystray
 from PIL import Image, ImageDraw
 from pystray import MenuItem as item
@@ -109,6 +110,9 @@ def _open_settings_thread(icon):
         init_redis()
     open_settings_window(on_save_callback=on_save)
 
+def menu_action_dashboard(icon, item):
+    webbrowser.open("http://localhost:8089")
+
 def menu_action_settings(icon, item):
     threading.Thread(target=_open_settings_thread, args=(icon,), daemon=True).start()
 
@@ -172,6 +176,8 @@ def create_menu():
     return pystray.Menu(
         item('🟢 GPU Libera (Workflow AI Completo)', menu_action_green, checked=lambda item: SEMAPHORE_GREEN, radio=True),
         item('🔴 GPU Occupata (Solo Cloud Gateway)', menu_action_red, checked=lambda item: not SEMAPHORE_GREEN, radio=True),
+        pystray.Menu.SEPARATOR,
+        item('🖥️ Apri Dashboard (8089)', menu_action_dashboard),
         pystray.Menu.SEPARATOR,
         item('⚙️ Impostazioni...', menu_action_settings),
         pystray.Menu.SEPARATOR,

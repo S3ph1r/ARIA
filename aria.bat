@@ -27,12 +27,16 @@ timeout /t 2 >nul
 echo [2/3] Sincronizzazione Warehouse (Allineamento Modelli)...
 powershell -ExecutionPolicy Bypass -File "%ARIA_ROOT%\scripts\sync_junctions.ps1"
 
-echo [3/3] Avvio NODE ORCHESTRATOR (Tray Icon + Process Manager)...
-start "ARIA ORCHESTRATOR" cmd /k "cd /d %ARIA_ROOT% & echo ===== ARIA NODE ORCHESTRATOR ===== & %MINICONDA_ROOT%\python.exe aria_node_controller\main_tray.py --no-backends"
+echo [3/3] Avvio NODE ORCHESTRATOR (Tray Icon in background, log su logs\aria_orchestrator.log)...
+powershell -WindowStyle Hidden -Command "Start-Process '%MINICONDA_ROOT%\python.exe' -ArgumentList '-X utf8 -u %ARIA_ROOT%\aria_node_controller\main_tray.py --no-backends' -WorkingDirectory '%ARIA_ROOT%' -WindowStyle Hidden -RedirectStandardOutput '%ARIA_ROOT%\logs\aria_orchestrator.log' -RedirectStandardError '%ARIA_ROOT%\logs\aria_orchestrator_err.log'"
+
+echo [4/4] Avvio ARIA Dashboard (http://localhost:8089)...
+powershell -WindowStyle Hidden -Command "Start-Process '%MINICONDA_ROOT%\python.exe' -ArgumentList '-X utf8 %ARIA_ROOT%\aria_node_controller\dashboard\server.py' -WorkingDirectory '%ARIA_ROOT%' -WindowStyle Hidden"
 
 echo.
 echo =======================================================
 echo  ARIA attiva e in ascolto su Redis.
 echo  Semaforo e parametri disponibili via Tray Icon.
+echo  Dashboard disponibile su http://localhost:8089
 echo =======================================================
 timeout /t 5 >nul
