@@ -1,60 +1,70 @@
 import gc
 import logging
-
 import torch
+import numpy as np
+import soundfile as sf
+import os
+
+# Import specifici per Qwen3-ASR
+try:
+    from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
+except ImportError:
+    Qwen3ASRModel = None
+
+# Fix per caricamento modelli con versioni recenti di Torch (PyTorch 2.6+)
+# Questo risolve l'errore "WeightsUnpickler error: Unsupported global"
+try:
+    from pyannote.audio.core.task import Specifications
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals([Specifications])
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
+# Percorsi locali per autonomia totale
 MODEL_DIR = r"C:\Users\Roberto\aria\data\assets\models"
-ASR_MODEL_PATH = MODEL_DIR + r"\qwen3-asr-1.7b"
-ALIGNER_MODEL_PATH = MODEL_DIR + r"\qwen3-forced-aligner-0.6b"
-PYANNOTE_MODEL = "pyannote/speaker-diarization-community-1"
-
+ASR_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-asr-1.7b")
+ALIGNER_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-forced-aligner-0.6b")
+PYANNOTE_CONFIG = os.path.join(MODEL_DIR, "pyannote", "config.yaml")
 
 class ASRPipeline:
     def __init__(self):
         self._loaded = False
-        self.asr_model = None
-        self.asr_processor = None
-        self.aligner = None
-        self.aligner_proc = None
+        self.asr_pipeline = None 
         self.diarizer = None
 
     def load(self):
         if self._loaded:
             return
 
-        logger.info("Loading Qwen3-ASR-1.7B ...")
-        from transformers import AutoModelForCTC, AutoProcessor
-        self.asr_processor = AutoProcessor.from_pretrained(ASR_MODEL_PATH)
-        self.asr_model = AutoModelForCTC.from_pretrained(
-            ASR_MODEL_PATH,
-            torch_dtype=torch.bfloat16,
+        if Qwen3ASRModel is None:
+            raise ImportError("Pacchetto 'qwen_asr' non trovato nell'ambiente.")
+
+        logger.info("Loading Qwen3-ASR-1.7B (Local)...")
+        # Caricamento Qwen3 con wrapper nativo
+        self.asr_pipeline = Qwen3ASRModel.from_pretrained(
+            pretrained_model_name_or_path=ASR_MODEL_PATH,
+            forced_aligner=ALIGNER_MODEL_PATH,
+            dtype=torch.bfloat16,
             device_map="cuda",
+            trust_remote_code=True
         )
 
-        logger.info("Loading Qwen3-ForcedAligner-0.6B ...")
-        from transformers import AutoModelForCTC as AlignerModel, AutoProcessor as AlignerProc
-        self.aligner_proc = AlignerProc.from_pretrained(ALIGNER_MODEL_PATH)
-        self.aligner = AlignerModel.from_pretrained(
-            ALIGNER_MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda",
-        )
-
-        logger.info("Loading pyannote speaker-diarization-community-1 ...")
+        logger.info(f"Loading pyannote diarization from local config: {PYANNOTE_CONFIG}")
         from pyannote.audio import Pipeline
-        self.diarizer = Pipeline.from_pretrained(PYANNOTE_MODEL)
+        # Caricamento autonomo da config locale
+        self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
         self.diarizer = self.diarizer.to(torch.device("cuda"))
 
         self._loaded = True
         vram_gb = torch.cuda.memory_allocated() / 1e9
-        logger.info("Models loaded. VRAM used: %.1f GB", vram_gb)
+        logger.info("Models loaded (OFFLINE MODE). VRAM used: %.1f GB", vram_gb)
 
     def unload(self):
         if not self._loaded:
             return
-        del self.asr_model, self.asr_processor, self.aligner, self.aligner_proc, self.diarizer
+        del self.asr_pipeline, self.diarizer
         gc.collect()
         torch.cuda.empty_cache()
         self._loaded = False
@@ -66,26 +76,22 @@ class ASRPipeline:
         return_timestamps: bool = True,
         return_speaker_turns: bool = True,
     ) -> dict:
-        import soundfile as sf
+        if not self._loaded:
+            self.load()
 
         audio, sr = sf.read(wav_path)
         duration_ms = int(len(audio) / sr * 1000)
 
-        # ASR transcription
-        inputs = self.asr_processor(audio, sampling_rate=sr, return_tensors="pt")
-        inputs = {k: v.to("cuda") for k, v in inputs.items()}
-
-        gen_kwargs = {}
-        if language:
-            gen_kwargs["language"] = language
-
-        with torch.no_grad():
-            output = self.asr_model.generate(**inputs, **gen_kwargs, return_dict_in_generate=True)
-
-        transcript = self.asr_processor.batch_decode(
-            output.sequences, skip_special_tokens=True
-        )[0].strip()
-        detected_lang = language or "it"
+        logger.info(f"Processing ASR for {wav_path}...")
+        results = self.asr_pipeline.transcribe(
+            audio=wav_path,
+            language=language,
+            return_time_stamps=return_timestamps
+        )
+        
+        main_res = results[0]
+        transcript = main_res.text
+        detected_lang = main_res.language or language or "it"
 
         result: dict = {
             "transcript": transcript,
@@ -93,18 +99,18 @@ class ASRPipeline:
             "duration_ms": duration_ms,
         }
 
-        # Word timestamps via ForcedAligner
-        if return_timestamps:
-            try:
-                result["word_timestamps"] = self._align(audio, sr, transcript)
-            except Exception as exc:
-                logger.warning("ForcedAligner failed: %s", exc)
-                result["word_timestamps"] = []
+        word_ts = []
+        if return_timestamps and main_res.time_stamps:
+            for it in main_res.time_stamps.items:
+                word_ts.append({
+                    "word": it.text,
+                    "start_ms": int(it.start_time * 1000),
+                    "end_ms": int(it.end_time * 1000)
+                })
+        result["word_timestamps"] = word_ts
 
-        # Speaker diarization
         if return_speaker_turns:
             try:
-                word_ts = result.get("word_timestamps", [])
                 result["speaker_turns"] = self._diarize(wav_path, transcript, word_ts)
             except Exception as exc:
                 logger.warning("Diarization failed: %s", exc)
@@ -119,36 +125,19 @@ class ASRPipeline:
 
         return result
 
-    def _align(self, audio, sr: int, transcript: str) -> list[dict]:
-        inputs = self.aligner_proc(audio, text=transcript, sampling_rate=sr, return_tensors="pt")
-        inputs = {k: v.to("cuda") for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = self.aligner(**inputs)
-        decoded = self.aligner_proc.batch_decode(outputs.logits, output_word_offsets=True)
-        words = []
-        if hasattr(decoded, "word_offsets") and decoded.word_offsets:
-            time_offset_ms = 20  # 50fps → 20ms per frame
-            for entry in decoded.word_offsets[0]:
-                words.append(
-                    {
-                        "word": entry["word"],
-                        "start_ms": entry["start_offset"] * time_offset_ms,
-                        "end_ms": entry["end_offset"] * time_offset_ms,
-                    }
-                )
-        return words
-
     def _diarize(self, wav_path: str, transcript: str, word_timestamps: list) -> list[dict]:
         diarization = self.diarizer({"uri": "segment", "audio": wav_path})
         turns = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):
             start_ms = int(turn.start * 1000)
             end_ms = int(turn.end * 1000)
+            
             words_in_turn = [
                 w["word"]
                 for w in word_timestamps
-                if w["start_ms"] >= start_ms and w["end_ms"] <= end_ms + 100
+                if w["start_ms"] >= start_ms - 50 and w["end_ms"] <= end_ms + 150
             ]
+            
             turns.append(
                 {
                     "speaker": speaker,

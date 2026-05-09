@@ -69,6 +69,7 @@ try:
     from backends.qwen35_llm import Qwen35LLMBackend
     from backends.acestep import ACEStepBackend
     from backends.audiocraft import AudiocraftBackend
+    from backends.lifelog_asr import LifelogASRBackend
     _BACKENDS_AVAILABLE = True
     HAS_ACESTEP = True
     HAS_AUDIOCRAFT = True
@@ -78,6 +79,7 @@ except ImportError:
         from ..backends.qwen35_llm import Qwen35LLMBackend
         from ..backends.acestep import ACEStepBackend
         from ..backends.audiocraft import AudiocraftBackend
+        from ..backends.lifelog_asr import LifelogASRBackend
         _BACKENDS_AVAILABLE = True
         HAS_ACESTEP = True
         HAS_AUDIOCRAFT = True
@@ -493,6 +495,7 @@ class NodeOrchestrator:
         self._qwen35_backend = Qwen35LLMBackend() if _BACKENDS_AVAILABLE else None
         self._acestep_backend    = ACEStepBackend() if HAS_ACESTEP else None
         self._audiocraft_backend = AudiocraftBackend() if HAS_AUDIOCRAFT else None
+        self._asr_backend        = LifelogASRBackend() if _BACKENDS_AVAILABLE else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
@@ -638,7 +641,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "acestep-1.5-xl-sft"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "acestep-1.5-xl-sft", "qwen3-asr-1.7b"]
         current_model = None
 
         last_heartbeat = 0
@@ -651,6 +654,9 @@ class NodeOrchestrator:
                 for q_key in self.qm.redis.scan_iter(match=pattern):
                     # Map the specific client queue to the model logic ID for the optimizer
                     known_models[f"{model_id}:{q_key}"] = q_key
+            
+            if known_models:
+                logger.info(f"Discovered queues: {list(known_models.values())}")
             # Heartbeat ogni 5 secondi per dashboard reattiva
             if time.time() - last_heartbeat > 5:
                 self._send_heartbeat()
@@ -782,6 +788,8 @@ class NodeOrchestrator:
             self._process_acestep_task(task, start_t)
         elif task.model_id == "qwen3.5-35b-moe-q3ks":
             self._process_llm_task(task, start_t)
+        elif task.model_id == "qwen3-asr-1.7b" or task.model_type == "stt":
+            self._process_asr_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
             try:
                 # --- Intent-based Resolution (SOA v2.0) ---
@@ -1185,6 +1193,47 @@ class NodeOrchestrator:
 
         except Exception as e:
             logger.error(f"Audiocraft Task Failed: {e}", exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e),
+            )
+            self.qm.post_result(task, result)
+
+    def _process_asr_task(self, task, start_t: float):
+        """Dispatch di un task STT verso LifelogASRBackend."""
+        if not self._asr_backend:
+            raise RuntimeError("LifelogASRBackend non disponibile.")
+
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend ASR per {task.model_id}")
+
+        try:
+            result_data = self._asr_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip,
+            )
+            duration_s = time.time() - start_t
+
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output=result_data.get("output", {})
+            )
+            self.qm.post_result(task, result)
+            logger.info(f"ASR Task Completed: {task.job_id}")
+
+        except Exception as e:
+            logger.error(f"ASR Task Failed: {e}", exc_info=True)
             result = AriaTaskResult(
                 job_id=task.job_id,
                 client_id=task.client_id,
