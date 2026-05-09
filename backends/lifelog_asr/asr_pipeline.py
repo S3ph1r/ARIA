@@ -4,6 +4,39 @@ import torch
 import numpy as np
 import soundfile as sf
 import os
+import warnings
+import functools
+
+# Soppressione dei warning superflui per un terminale pulito
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.core.io")
+warnings.filterwarnings("ignore", message="triton not found")
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
+# Fix per caricamento modelli con versioni recenti di Torch (PyTorch 2.6+ / 2.11 Nightly)
+# Questo permette il caricamento di classi specifiche in modalità weights_only=True
+import torch.torch_version
+try:
+    from pyannote.audio.core.task import Specifications
+    from omegaconf.listconfig import ListConfig
+    from omegaconf.dictconfig import DictConfig
+    
+    safe_globals = [
+        torch.torch_version.TorchVersion,
+        Specifications,
+        ListConfig,
+        DictConfig,
+        np.dtype,
+        np.core.multiarray._reconstruct,
+        np.ndarray,
+    ]
+    
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals(safe_globals)
+        # Alcune versioni di torch usano una lista interna diversa, aggiungiamo per sicurezza
+        if hasattr(torch.serialization, '_get_safe_globals'):
+             torch.serialization._get_safe_globals().update(safe_globals)
+except Exception:
+    pass
 
 # Import specifici per Qwen3-ASR
 try:
@@ -11,18 +44,9 @@ try:
 except ImportError:
     Qwen3ASRModel = None
 
-# Fix per caricamento modelli con versioni recenti di Torch (PyTorch 2.6+)
-# Questo risolve l'errore "WeightsUnpickler error: Unsupported global"
-try:
-    from pyannote.audio.core.task import Specifications
-    if hasattr(torch.serialization, 'add_safe_globals'):
-        torch.serialization.add_safe_globals([Specifications])
-except ImportError:
-    pass
-
 logger = logging.getLogger(__name__)
 
-# Percorsi locali per autonomia totale
+# Percorsi locali per autonomia totale (PC 139)
 MODEL_DIR = r"C:\Users\Roberto\aria\data\assets\models"
 ASR_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-asr-1.7b")
 ALIGNER_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-forced-aligner-0.6b")
@@ -41,8 +65,8 @@ class ASRPipeline:
         if Qwen3ASRModel is None:
             raise ImportError("Pacchetto 'qwen_asr' non trovato nell'ambiente.")
 
-        logger.info("Loading Qwen3-ASR-1.7B (Local)...")
-        # Caricamento Qwen3 con wrapper nativo
+        logger.info("Loading Qwen3-ASR-1.7B (Local, Blackwell sm_120)...")
+        # Caricamento Qwen3 con wrapper nativo in BF16 per Blackwell
         self.asr_pipeline = Qwen3ASRModel.from_pretrained(
             pretrained_model_name_or_path=ASR_MODEL_PATH,
             forced_aligner=ALIGNER_MODEL_PATH,
@@ -51,15 +75,16 @@ class ASRPipeline:
             trust_remote_code=True
         )
 
-        logger.info(f"Loading pyannote diarization from local config: {PYANNOTE_CONFIG}")
+        logger.info(f"Loading pyannote diarization (Offline Mode)...")
         from pyannote.audio import Pipeline
-        # Caricamento autonomo da config locale
+        # Caricamento autonomo da config locale. 
+        # NOTA: Pyannote 3.1 internamente usa torch.load, i safe_globals sopra risolvono il blocco.
         self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
         self.diarizer = self.diarizer.to(torch.device("cuda"))
 
         self._loaded = True
         vram_gb = torch.cuda.memory_allocated() / 1e9
-        logger.info("Models loaded (OFFLINE MODE). VRAM used: %.1f GB", vram_gb)
+        logger.info("Models loaded successfully. VRAM used: %.1f GB", vram_gb)
 
     def unload(self):
         if not self._loaded:
@@ -82,7 +107,7 @@ class ASRPipeline:
         audio, sr = sf.read(wav_path)
         duration_ms = int(len(audio) / sr * 1000)
 
-        logger.info(f"Processing ASR for {wav_path}...")
+        logger.info(f"Transcribing: {wav_path}")
         results = self.asr_pipeline.transcribe(
             audio=wav_path,
             language=language,
@@ -113,7 +138,7 @@ class ASRPipeline:
             try:
                 result["speaker_turns"] = self._diarize(wav_path, transcript, word_ts)
             except Exception as exc:
-                logger.warning("Diarization failed: %s", exc)
+                logger.warning("Diarization skip: %s", exc)
                 result["speaker_turns"] = [
                     {
                         "speaker": "SPEAKER_00",
