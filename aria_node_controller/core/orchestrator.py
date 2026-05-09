@@ -159,6 +159,7 @@ class ModelProcessManager:
         self.miniconda_root = miniconda_root
         self._procs: dict[str, subprocess.Popen] = {}
         self._idle_since: dict[str, float]        = {}
+        self._starting: set[str]                  = set()
         self._lock = threading.Lock()
 
         # Caricamento Manifest dei Backend
@@ -243,16 +244,19 @@ class ModelProcessManager:
         """Avvia un singolo processo e attende il health check."""
 
         with self._lock:
-            # 0. Gestione Conflitti Porta (SOA v2.1)
-            # Se un ALTRO modello sta usando la stessa porta, dobbiamo killarlo
-            # per liberare la GPU e il socket.
-            target_port = self.MODEL_CONFIGS[model_id].get("port")
-            if target_port:
-                for other_id, other_config in self.MODEL_CONFIGS.items():
-                    if other_id != model_id and other_config.get("port") == target_port:
-                        if self._is_proc_active(other_id):
-                            logger.info(f"Port Conflict: {other_id} occupa porta {target_port}. Termino per far posto a {model_id}...")
-                            self._kill_proc(other_id)
+            # 0. Gestione Esclusività GPU (Solo un backend locale alla volta)
+            # Killiamo proattivamente ogni altro backend tracciato
+            for other_id in list(self._procs.keys()):
+                if other_id != model_id:
+                    logger.info(f"GPU Exclusivity: Termino {other_id} per far posto a {model_id}...")
+                    self._kill_proc(other_id)
+
+            # Nuclear Option (Windows): Kill per titolo per ogni altro modello nel manifest (zombie detection)
+            if os.name == 'nt':
+                for mid in self.MODEL_CONFIGS.keys():
+                    if mid != model_id:
+                        title = f"ARIA Backend: {mid}"
+                        subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True)
 
             # 1. Controllo proattivo...
             if self._health_check(model_id):
@@ -262,13 +266,22 @@ class ModelProcessManager:
 
             proc = self._procs.get(model_id)
 
-            # Il processo era morto o non esisteva
+            # 2. Controllo Warm-up (Memory di ARIA)
+            if model_id in self._starting:
+                logger.info(f"{model_id}: backend già in fase di warm-up, attendo il pronto...")
+                return True # L'attesa reale avverrà nel loop esterno di ensure_running
+
+            # 3. Gestione processo esistente ma non responsivo
             if proc and proc.poll() is not None:
                 logger.warning(f"{model_id}: processo terminato inaspettatamente, riavvio...")
             elif proc and proc.poll() is None:
-                # Se arriviamo qui, il processo esiste ma NON è responsive (altrimenti saremmo usciti sopra)
+                # Se arriviamo qui, il processo esiste ma NON è responsive.
+                # Killiamo solo se NON è in fase di avvio (già gestito sopra)
                 logger.warning(f"{model_id}: processo attivo ma non risponde. Lo termino per riavvio pulito...")
                 self._kill_proc(model_id)
+            
+            # 4. Registrazione avvio
+            self._starting.add(model_id)
 
             # Avvio
             try:
@@ -350,17 +363,25 @@ class ModelProcessManager:
                 logger.error(f"Impossibile avviare {model_id}: {e}")
                 return False
 
-        # Wait for health check (fuori dal lock per non bloccare)
+        # Wait for health check (fuori dal lock per non bloccare altri modelli o la dashboard)
         max_wait = self.MODEL_CONFIGS[model_id]["startup_wait"]
         logger.info(f"Attesa health check {model_id} (max {max_wait}s)...")
-        for _ in range(max_wait):
-            if self._health_check(model_id):
-                logger.info(f"{model_id}: health check OK")
-                return True
-            time.sleep(1)
+        
+        success = False
+        try:
+            for _ in range(max_wait):
+                if self._health_check(model_id):
+                    logger.info(f"{model_id}: health check OK")
+                    success = True
+                    break
+                time.sleep(1)
+        finally:
+            with self._lock:
+                self._starting.discard(model_id)
 
-        logger.error(f"{model_id}: timeout health check ({max_wait}s)")
-        return False
+        if not success:
+            logger.error(f"{model_id}: timeout health check ({max_wait}s)")
+        return success
 
     def mark_idle(self, model_id: str):
         """Segnala che la coda di questo modello era vuota in questo ciclo."""
@@ -408,8 +429,17 @@ class ModelProcessManager:
 
     def shutdown_all(self):
         """Termina tutti i backend (e companion) all'arresto dell'orchestratore."""
+        # 1. Kill dei processi tracciati via Popen
         for model_id in list(self._procs.keys()):
             self._kill_proc(model_id)
+        
+        # 2. Nuclear Option (Windows): Kill forzato per TITOLO per tutti i modelli nel manifest
+        # Questo cattura processi "zombie" o avviati prima dell'orchestratore attuale.
+        if os.name == 'nt':
+            for model_id in self.MODEL_CONFIGS.keys():
+                title = f"ARIA Backend: {model_id}"
+                subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True)
+
         self._procs.clear()
         self._idle_since.clear()
 
@@ -456,6 +486,7 @@ class NodeOrchestrator:
 
         # Cache RAM per token cloni
         self.token_cache = {}
+        self.current_tasks = {} # model_id -> job_id
 
         # Backend lazy instances
         self._qwen3_backend = Qwen3TTSBackend() if _BACKENDS_AVAILABLE else None
@@ -475,7 +506,8 @@ class NodeOrchestrator:
         self.cloud_manager = CloudManager(
             queue_manager=self.qm,
             aria_root=ARIA_ROOT,
-            rate_limiter=self.rate_limiter
+            rate_limiter=self.rate_limiter,
+            current_tasks_ref=self.current_tasks
         )
 
         self.registry = AriaRegistryManager(
@@ -519,18 +551,45 @@ class NodeOrchestrator:
 
     def stop(self):
         self.running = False
-        self.process_manager.shutdown_all()   # termina Fish e Qwen3 se attivi
+        
+        logger.info("--- SHUTDOWN SEQUENCE STARTED ---")
+        
+        # 1. Stop dei manager logici
+        logger.info("[1/5] Stopping CloudManager...")
         self.cloud_manager.stop()            # ferma il loop cloud
-        # Server HTTP gestirà al massimo una richiesta fake per sbloccarsi
+        
+        logger.info("[2/5] Shutting down AI Backends...")
+        self.process_manager.shutdown_all()   # termina tutti i backend locali
+        
+        # 2. Kill della Dashboard (se attiva)
+        if os.name == 'nt':
+            logger.info("[3/5] Terminating Dashboard server...")
+            cmd_kill_db = 'powershell -Command "Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like \'*dashboard/server.py*\' -or $_.CommandLine -like \'*dashboard\\\\server.py*\' } | Stop-Process -Force"'
+            try:
+                subprocess.run(cmd_kill_db, shell=True, capture_output=True, timeout=5)
+            except Exception as e:
+                logger.warning(f"Dashboard kill failed or timed out: {e}")
+        
+        # 3. Sblocco e stop dell'Asset Server HTTP
+        logger.info("[4/5] Stopping Asset Server...")
         try:
-             requests.get(f"http://127.0.0.1:{HTTP_PORT}/", timeout=1)
+             requests.get(f"http://127.0.0.1:{HTTP_PORT}/", timeout=0.5)
         except:
              pass
+             
         if self.thread:
-            self.thread.join(timeout=3)
+            self.thread.join(timeout=2)
         if self.http_thread:
-            self.http_thread.join(timeout=3)
-        logger.info("Orchestrator thread stopped")
+            self.http_thread.join(timeout=2)
+
+        # 4. Cleanup Redis
+        logger.info("[5/5] Closing Redis connection...")
+        try:
+            self.qm.redis.close()
+        except:
+            pass
+            
+        logger.info("--- SHUTDOWN COMPLETE ---")
 
 
     def set_semaphore(self, state: bool):
@@ -569,6 +628,7 @@ class NodeOrchestrator:
                 "cloud_status": "online",  # Cloud tasks are decoupled from GPU semaphore
                 "last_seen": datetime.now(timezone.utc).isoformat(),
                 "active_backends": list(self.process_manager._procs.keys()),
+                "current_tasks": self.current_tasks,
                 "available_voices": self._discover_voices(),
             }
             key = f"aria:global:node:{self.local_ip}:status"
@@ -591,8 +651,8 @@ class NodeOrchestrator:
                 for q_key in self.qm.redis.scan_iter(match=pattern):
                     # Map the specific client queue to the model logic ID for the optimizer
                     known_models[f"{model_id}:{q_key}"] = q_key
-            # Heartbeat ogni 20 secondi
-            if time.time() - last_heartbeat > 20:
+            # Heartbeat ogni 5 secondi per dashboard reattiva
+            if time.time() - last_heartbeat > 5:
                 self._send_heartbeat()
                 last_heartbeat = time.time()
 
@@ -606,8 +666,11 @@ class NodeOrchestrator:
             try:
                 decision = self.optimizer.decide_next_queue(known_models, current_model)
                 if not decision:
-                    # Nessuna coda attiva — marca tutti come idle
-                    for mid in known_models:
+                    # Nessuna coda attiva — marca tutti i backend caricati come idle
+                    # Usa _procs.keys() invece di known_models: quando le code sono vuote
+                    # known_models è vuoto e mark_idle() non verrebbe mai chiamato,
+                    # impedendo a shutdown_idle_backends() di spegnere i backend inattivi.
+                    for mid in list(self.process_manager._procs.keys()):
                         self.process_manager.mark_idle(mid)
                     time.sleep(1)
                     continue
@@ -637,7 +700,11 @@ class NodeOrchestrator:
                     continue
 
                 logger.info(f"Processing task {payload.job_id} for {payload.model_id}")
-                self._process_task(payload)
+                self.current_tasks[base_model_id] = payload.job_id
+                try:
+                    self._process_task(payload)
+                finally:
+                    self.current_tasks.pop(base_model_id, None)
 
             except Exception as e:
                 logger.error("Error in orchestrator loop", exc_info=True)
