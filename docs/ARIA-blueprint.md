@@ -406,6 +406,7 @@ C:\Users\Roberto\
 | `mus` | `audiocraft-medium` | `AudiocraftBackend` | `envs/dias-sound-engine` | [audiocraft-backend.md](backends/audiocraft-backend.md) | 8086 | ✅ |
 | `llm` | `qwen3.5-35b-moe-q3ks` | `Qwen35LLMBackend` | `envs/nh-qwen35-llm` | [qwen35-llm-moe.md](backends/qwen35-llm-moe.md) | 8085 | ✅ |
 | `llm` | `cloud-gemini` | `CloudManager` | `envs/aria-cloud` | — | — | ✅ (fallback) |
+| `stt` | `qwen3-asr-1.7b` | `LifelogASRBackend` | `envs/lifelog-asr` | [lifelog-asr.md](backends/lifelog-asr.md) | 8087 | 🔧 setup |
 
 ### Pattern comune a tutti i backend
 

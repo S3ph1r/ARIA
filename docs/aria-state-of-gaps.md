@@ -51,11 +51,25 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 **Priorità:** bassa  
 **Scoperto:** 2026-04-24  
 **Descrizione:** Gli ambienti Conda per Fish, Qwen3 ecc. sono installati nel Miniconda globale di Windows, non come `--prefix` isolati per ARIA. Rischio di conflitti di dipendenze con altri tool.  
-**Fix proposto:** Migrare a `conda create --prefix C:\Users\Roberto\aria\envs\{nome}`.
+**Fix proposto:** Migrare a `conda create --prefix C:\Users\Roberto\aria\envs\{nome}`.  
+**Nota (2026-05-07):** L'env `lifelog-asr` è già stato creato con `--prefix` isolato — pattern corretto adottato per i nuovi backend.
 
 ---
 
 ## Gap Risolti
+
+### A0-2 — Nessun backend STT/ASR disponibile per Lifelog2
+**Stato:** resolved  
+**Risolto:** 2026-05-07  
+**Descrizione:** ARIA non aveva alcun backend Speech-to-Text. Lifelog2 Stage C richiedeva trascrizione, diarizzazione speaker e word timestamps per costruire la memoria strutturata Z1.  
+**Soluzione adottata:**
+- Env `lifelog-asr` (Python 3.12, PyTorch 2.11.0+cu128, sm_120 native)
+- Modelli: Qwen3-ASR-1.7B (WER IT 5.40%) + ForcedAligner-0.6B + pyannote community-1
+- Backend `LifelogASRBackend` su porta 8087, JIT via `ModelProcessManager`
+- Coda Redis: `aria:q:stt:local:qwen3-asr-1.7b:lifelog`
+- Doc: [lifelog-asr.md](backends/lifelog-asr.md)
+
+---
 
 ### A0-0 — Output WAV non eliminati da PC 139 dopo download Stage D
 **Stato:** resolved  

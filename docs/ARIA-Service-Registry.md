@@ -1,5 +1,5 @@
 # ARIA Service Registry
-## Stato Operativo — Aprile 2026
+## Stato Operativo — Maggio 2026
 
 Registro completo di tutti i servizi attivi sul nodo ARIA (PC 139, `192.168.1.139`).
 Aggiornato ad ogni modifica architetturale significativa.
@@ -28,8 +28,11 @@ Aggiornato ad ogni modifica architetturale significativa.
 | ACE-Step 1.5 XL SFT | 8084 | `envs/dias-sound-engine` | `backends/acestep/aria_wrapper_server.py` | ✅ Operativo | ~8 GB |
 | Qwen3.5 35B MoE | 8085 | `envs/nh-qwen35-llm` | `backends/llm/server.py` | ✅ Operativo | ~13-14 GB |
 | Audiocraft (AudioGen+MusicGen) | 8086 | `envs/dias-sound-engine` | `backends/audiocraft/aria_audiocraft_server.py` | ✅ Operativo | ~4-6 GB |
+| Lifelog ASR (Qwen3-ASR-1.7B) | 8087 | `envs/lifelog-asr` | `backends/lifelog_asr/server.py` | 🔧 In setup | ~9 GB |
 
 > I backend su porta 8084 e 8086 condividono lo stesso ambiente `dias-sound-engine` ma sono processi distinti avviati in momenti diversi — mai in contemporanea per gestione VRAM.
+
+> Il backend 8087 è JIT: avviato dall'orchestratore al primo task Lifelog2, termina dopo 30 min di inattività. Include Qwen3-ASR-1.7B + ForcedAligner-0.6B + pyannote community-1.
 
 ---
 
@@ -43,6 +46,7 @@ Tutte le code seguono il pattern: `aria:q:{type}:local:{model_id}:{client_id}`
 | `aria:q:tts:local:fish-s1-mini:dias` | Fish S1-mini (8080) | TTS con emotion tagging | DIAS |
 | `aria:q:llm:local:qwen3.5-35b-moe-q3ks:dias` | Qwen3.5 35B (8085) | LLM ragionamento | DIAS |
 | `aria:q:mus:local:acestep-1.5-xl-sft:dias` | Orchestratore | Musica/Suono (PAD, AMB, SFX, STING, Leitmotif) | DIAS |
+| `aria:q:stt:local:qwen3-asr-1.7b:lifelog` | Lifelog ASR (8087) | Trascrizione audio + diarizzazione | Lifelog2 |
 | `aria:q:cloud:*` | CloudManager | Gemini API (fallback) | vari |
 
 > La coda `aria:q:mus:local:acestep-1.5-xl-sft:dias` gestisce **tutti** i task audio. Il routing interno (ACE-Step vs Audiocraft) avviene tramite il campo `model_id` nel payload:
@@ -62,6 +66,7 @@ Tutte le code seguono il pattern: `aria:q:{type}:local:{model_id}:{client_id}`
 | `aria-cloud` | 3.12 | — | Google GenAI SDK (Gemini) | ✅ Operativo |
 | `sox` | — | — | SoX audio processing tool | ✅ Operativo |
 | `audiocraft-env` | 3.11 | 2.11.0+cu128 | — | ⛔ Deprecato (sostituito da `dias-sound-engine`) |
+| `lifelog-asr` | 3.12 | 2.11.0+cu128 | Qwen3-ASR-1.7B, ForcedAligner-0.6B, pyannote.audio 4.0.1 | 🔧 In setup (2026-05-07) |
 
 ---
 
@@ -89,6 +94,7 @@ http://localhost:8083/health       → Qwen3-TTS
 http://localhost:8084/health       → ACE-Step wrapper
 http://localhost:8085/v1/health    → Qwen3.5 35B LLM
 http://localhost:8086/health       → Audiocraft (AudioGen + MusicGen)
+http://localhost:8087/health       → Lifelog ASR (Qwen3-ASR-1.7B + ForcedAligner + pyannote)
 ```
 
 ---
@@ -108,6 +114,9 @@ Tutti i pesi risiedono in `ARIA_ROOT/data/assets/models/` (git-ignored).
 | MusicGen Small | `models/audiocraft/models--facebook--musicgen-small/` | ~0.5 GB |
 | AudioGen Medium | (scaricato da HuggingFace al primo avvio) | ~1.5 GB |
 | HTDemucs 6s | (scaricato da HuggingFace al primo avvio) | ~0.5 GB |
+| Qwen3-ASR-1.7B | `models/qwen3-asr-1.7b/` | ~3.5 GB |
+| Qwen3-ForcedAligner-0.6B | `models/qwen3-forced-aligner-0.6b/` | ~1.3 GB |
+| pyannote speaker-diarization-community-1 | (HF cache `~/.cache/huggingface/`) | ~2 GB |
 
 ---
 
@@ -118,3 +127,4 @@ Tutti i pesi risiedono in `ARIA_ROOT/data/assets/models/` (git-ignored).
 - [DIAS ↔ ARIA Sound Integration](DIAS-ARIA-ACEStep-Integration.md) — Protocollo produzione audio
 - [Audiocraft Backend](backends/audiocraft-backend.md) — Dettagli AudioGen/MusicGen
 - [ACE-Step Payload Strategy](backends/acestep-payload-strategy.md) — Payload per PAD/Leitmotif
+- [Lifelog ASR Backend](backends/lifelog-asr.md) — Qwen3-ASR-1.7B + ForcedAligner + pyannote, integrazione Lifelog2

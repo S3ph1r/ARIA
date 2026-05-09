@@ -4,7 +4,11 @@
       "metadata": {
         "display_name": "Fish Speech S1-mini",
         "description": "Modello TTS ad alta espressivita con supporto cloning e emotion-markers.",
-        "capabilities": ["tts", "voice-cloning", "emotion-tagging"]
+        "capabilities": [
+          "tts",
+          "voice-cloning",
+          "emotion-tagging"
+        ]
       },
       "port": 8080,
       "health_url": "http://localhost:8080/v1/health",
@@ -14,10 +18,14 @@
       "working_dir": "envs/fish-speech",
       "script": "tools/api_server.py",
       "args": [
-        "--listen", "0.0.0.0:8080",
-        "--llama-checkpoint-path", "data/assets/models/fish-s1-mini",
-        "--decoder-checkpoint-path", "data/assets/models/fish-s1-mini/codec.pth",
-        "--decoder-config-name", "modded_dac_vq"
+        "--listen",
+        "0.0.0.0:8080",
+        "--llama-checkpoint-path",
+        "data/assets/models/fish-s1-mini",
+        "--decoder-checkpoint-path",
+        "data/assets/models/fish-s1-mini/codec.pth",
+        "--decoder-config-name",
+        "modded_dac_vq"
       ],
       "companion": "voice-cloning"
     },
@@ -25,7 +33,9 @@
       "metadata": {
         "display_name": "Fish Voice Encoder",
         "description": "Backend di supporto per l'encoding VQGAN dei campioni vocali.",
-        "capabilities": ["audio-encoding"]
+        "capabilities": [
+          "audio-encoding"
+        ]
       },
       "port": 8081,
       "health_url": "http://localhost:8081/health",
@@ -38,7 +48,12 @@
       "metadata": {
         "display_name": "Qwen3-TTS 1.7B",
         "description": "Motore TTS per audiolibri con supporto Natural Language Instruct e calore vocale superiore.",
-        "capabilities": ["tts", "instruction-following", "auto-padding", "audiobook-style"]
+        "capabilities": [
+          "tts",
+          "instruction-following",
+          "auto-padding",
+          "audiobook-style"
+        ]
       },
       "port": 8083,
       "health_url": "http://localhost:8083/health",
@@ -47,15 +62,21 @@
       "template": "envs/templates/qwen3-tts.yml",
       "script": "backends/qwen3tts/server.py",
       "args": [
-        "--model-path", "data/assets/models/qwen3-tts-1.7b",
-        "--port", "8083"
+        "--model-path",
+        "data/assets/models/qwen3-tts-1.7b",
+        "--port",
+        "8083"
       ]
     },
     "qwen3.5-35b-moe-q3ks": {
       "metadata": {
         "display_name": "Qwen3.5 35B MoE",
         "description": "Modello LLM locale ad alte prestazioni operato via Llama_cpp (GGUF).",
-        "capabilities": ["chat", "reasoning", "creative-writing"]
+        "capabilities": [
+          "chat",
+          "reasoning",
+          "creative-writing"
+        ]
       },
       "port": 8085,
       "health_url": "http://localhost:8085/v1/health",
@@ -67,7 +88,11 @@
       "metadata": {
         "display_name": "SoX Audio Engine",
         "description": "Utility di sistema per l'elaborazione e conversione audio.",
-        "capabilities": ["audio-processing", "resampling", "mixing"]
+        "capabilities": [
+          "audio-processing",
+          "resampling",
+          "mixing"
+        ]
       },
       "env_prefix": "envs/sox",
       "conda_pkg": "sox -c conda-forge"
@@ -76,7 +101,11 @@
       "metadata": {
         "display_name": "ACE-Step 1.5 XL (SFT)",
         "description": "Motore musicale JIT. Wrapper persistente che lancia cli.py+TOML per ogni task. Produce WAV + .score.json nel Warehouse.",
-        "capabilities": ["music-generation", "sfx-generation", "audio-codes"]
+        "capabilities": [
+          "music-generation",
+          "sfx-generation",
+          "audio-codes"
+        ]
       },
       "port": 8084,
       "health_url": "http://localhost:8084/health",
@@ -85,15 +114,21 @@
       "working_dir": "backends/acestep",
       "script": "backends/acestep/aria_wrapper_server.py",
       "args": [
-        "--host", "127.0.0.1",
-        "--port", "8084"
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8084"
       ]
     },
     "audiocraft-medium": {
       "metadata": {
         "display_name": "Audiocraft (AudioGen + MusicGen)",
         "description": "Wrapper JIT per AudioGen (amb/sfx) e MusicGen (sting). Routing interno per output_style.",
-        "capabilities": ["sound-effects", "ambient-generation", "sting-generation"]
+        "capabilities": [
+          "sound-effects",
+          "ambient-generation",
+          "sting-generation"
+        ]
       },
       "port": 8086,
       "health_url": "http://localhost:8086/health",
@@ -102,9 +137,28 @@
       "working_dir": "backends/audiocraft",
       "script": "backends/audiocraft/aria_audiocraft_server.py",
       "args": [
-        "--host", "127.0.0.1",
-        "--port", "8086"
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8086"
       ]
+    },
+    "qwen3-asr-1.7b": {
+      "metadata": {
+        "display_name": "Lifelog ASR (Qwen3-ASR-1.7B)",
+        "description": "Backend STT per Lifelog2. Trascrizione multilingue (52 lingue) con ForcedAligner-0.6B (word timestamps) e pyannote community-1 (diarizzazione speaker).",
+        "capabilities": [
+          "stt",
+          "diarization",
+          "word-timestamps",
+          "language-detection"
+        ]
+      },
+      "port": 8087,
+      "health_url": "http://localhost:8087/health",
+      "startup_wait": 180,
+      "env_prefix": "envs/lifelog-asr",
+      "script": "backends/lifelog_asr/server.py"
     }
   }
 }

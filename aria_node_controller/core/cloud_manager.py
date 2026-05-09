@@ -39,12 +39,14 @@ class CloudManager:
         queue_manager: AriaQueueManager,
         aria_root: Path,
         rate_limiter: Optional[GeminiRateLimiter] = None,
+        current_tasks_ref: Optional[dict] = None,
     ):
         self.qm           = queue_manager
         self.aria_root    = aria_root
         self.rate_limiter = rate_limiter or GeminiRateLimiter(
             redis_client=queue_manager.redis
         )
+        self.current_tasks = current_tasks_ref if current_tasks_ref is not None else {}
         self._stop_event  = threading.Event()
         self._thread      = None
 
@@ -91,7 +93,13 @@ class CloudManager:
                         logger.info(
                             f"Processing cloud task {task.job_id} from {queue_key}"
                         )
-                        self.process_cloud_task(task)
+                        # Identificativo per dashboard (es. 'gemini-flash-lite-latest')
+                        model_id = task.model_id or "cloud-llm"
+                        self.current_tasks[model_id] = task.job_id
+                        try:
+                            self.process_cloud_task(task)
+                        finally:
+                            self.current_tasks.pop(model_id, None)
 
                 time.sleep(1)
 

@@ -117,23 +117,24 @@ def menu_action_settings(icon, item):
     threading.Thread(target=_open_settings_thread, args=(icon,), daemon=True).start()
 
 def menu_action_exit(icon, item):
-    global orchestrator, fish_tts_proc, fish_vqgan_proc
-    if orchestrator:
-        orchestrator.stop()
+    global orchestrator
+    print("\n--- INIZIO PROCEDURA DI USCITA ---")
     
-    print("Arresto dei server in background...")
-    if fish_tts_proc:
-        try:
-            fish_tts_proc.terminate()
-        except Exception:
-            pass
-    if fish_vqgan_proc:
-        try:
-            fish_vqgan_proc.terminate()
-        except Exception:
-            pass
-            
-    icon.stop()
+    try:
+        if orchestrator:
+            print("[1/3] Arresto Orchestratore...")
+            orchestrator.stop()
+            print("[2/3] Orchestratore arrestato.")
+        
+        print("[3/3] Chiusura Icona Systray...")
+        icon.stop()
+    except Exception as e:
+        print(f"Errore durante l'uscita: {e}")
+    finally:
+        # Nuclear Option: assicura che il processo muoia indipendentemente dai thread orfani
+        print("Uscita definitiva del processo.")
+        import os
+        os._exit(0)
 
 def setup(icon):
     global orchestrator, fish_tts_proc, fish_vqgan_proc
