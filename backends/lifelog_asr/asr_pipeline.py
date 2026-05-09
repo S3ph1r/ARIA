@@ -1,42 +1,21 @@
-import gc
+import os
+
+# SOLUZIONE ATOMICA PER BLACKWELL (sm_120) + PYTORCH 2.11
+# Disabilita il controllo 'weights_only' che causa pickle.UnpicklingError su Pyannote.
+# Deve essere impostata PRIMA di importare torch.
+os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 import logging
 import torch
 import numpy as np
 import soundfile as sf
-import os
 import warnings
-import functools
+import gc
 
-# Soppressione dei warning superflui per un terminale pulito
+# Soppressione warning per terminale pulito (Blackwell Optimized)
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.core.io")
 warnings.filterwarnings("ignore", message="triton not found")
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-
-# Fix per caricamento modelli con versioni recenti di Torch (PyTorch 2.6+ / 2.11 Nightly)
-# Questo permette il caricamento di classi specifiche in modalità weights_only=True
-import torch.torch_version
-try:
-    from pyannote.audio.core.task import Specifications
-    from omegaconf.listconfig import ListConfig
-    from omegaconf.dictconfig import DictConfig
-    
-    safe_globals = [
-        torch.torch_version.TorchVersion,
-        Specifications,
-        ListConfig,
-        DictConfig,
-        np.dtype,
-        np.core.multiarray._reconstruct,
-        np.ndarray,
-    ]
-    
-    if hasattr(torch.serialization, 'add_safe_globals'):
-        torch.serialization.add_safe_globals(safe_globals)
-        # Alcune versioni di torch usano una lista interna diversa, aggiungiamo per sicurezza
-        if hasattr(torch.serialization, '_get_safe_globals'):
-             torch.serialization._get_safe_globals().update(safe_globals)
-except Exception:
-    pass
 
 # Import specifici per Qwen3-ASR
 try:
@@ -46,7 +25,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Percorsi locali per autonomia totale (PC 139)
+# Percorsi locali ARIA (PC 139)
 MODEL_DIR = r"C:\Users\Roberto\aria\data\assets\models"
 ASR_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-asr-1.7b")
 ALIGNER_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-forced-aligner-0.6b")
@@ -65,7 +44,7 @@ class ASRPipeline:
         if Qwen3ASRModel is None:
             raise ImportError("Pacchetto 'qwen_asr' non trovato nell'ambiente.")
 
-        logger.info("Loading Qwen3-ASR-1.7B (Local, Blackwell sm_120)...")
+        logger.info("Loading Qwen3-ASR-1.7B (Local, Blackwell sm_120, BF16)...")
         # Caricamento Qwen3 con wrapper nativo in BF16 per Blackwell
         self.asr_pipeline = Qwen3ASRModel.from_pretrained(
             pretrained_model_name_or_path=ASR_MODEL_PATH,
@@ -75,16 +54,15 @@ class ASRPipeline:
             trust_remote_code=True
         )
 
-        logger.info(f"Loading pyannote diarization (Offline Mode)...")
+        logger.info(f"Loading pyannote diarization (Standard ACE-Step Stack Compatibility)...")
         from pyannote.audio import Pipeline
-        # Caricamento autonomo da config locale. 
-        # NOTA: Pyannote 3.1 internamente usa torch.load, i safe_globals sopra risolvono il blocco.
+        # Grazie a TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1, questo caricamento ora avrà successo su Torch 2.11
         self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
         self.diarizer = self.diarizer.to(torch.device("cuda"))
 
         self._loaded = True
         vram_gb = torch.cuda.memory_allocated() / 1e9
-        logger.info("Models loaded successfully. VRAM used: %.1f GB", vram_gb)
+        logger.info("ASR Pipeline ready. VRAM: %.1f GB", vram_gb)
 
     def unload(self):
         if not self._loaded:
