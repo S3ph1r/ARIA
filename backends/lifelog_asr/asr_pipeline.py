@@ -23,6 +23,11 @@ try:
 except ImportError:
     Qwen3ASRModel = None
 
+try:
+    from speechbrain.inference.speaker import EncoderClassifier
+except ImportError:
+    EncoderClassifier = None
+
 logger = logging.getLogger(__name__)
 
 # Percorsi locali ARIA (PC 139)
@@ -30,12 +35,14 @@ MODEL_DIR = r"C:\Users\Roberto\aria\data\assets\models"
 ASR_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-asr-1.7b")
 ALIGNER_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-forced-aligner-0.6b")
 PYANNOTE_CONFIG = os.path.join(MODEL_DIR, "pyannote", "config.yaml")
+SPEECHBRAIN_DIR = os.path.join(MODEL_DIR, "speechbrain")
 
 class ASRPipeline:
     def __init__(self):
         self._loaded = False
         self.asr_pipeline = None 
         self.diarizer = None
+        self.voiceprint_encoder = None
 
     def load(self):
         if self._loaded:
@@ -54,11 +61,22 @@ class ASRPipeline:
             trust_remote_code=True
         )
 
-        logger.info(f"Loading pyannote diarization (Standard ACE-Step Stack Compatibility)...")
+        # Caricamento Diarizzatore
+        logger.info("Loading pyannote diarization (Standard ACE-Step Stack Compatibility)...")
         from pyannote.audio import Pipeline
-        # Grazie a TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1, questo caricamento ora avrà successo su Torch 2.11
         self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
         self.diarizer = self.diarizer.to(torch.device("cuda"))
+
+        # Caricamento Voiceprint Encoder (SpeechBrain)
+        if EncoderClassifier:
+            logger.info("Loading SpeechBrain ECAPA-TDNN (192d Voiceprint)...")
+            self.voiceprint_encoder = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir=SPEECHBRAIN_DIR,
+                run_opts={"device": "cuda"}
+            )
+        else:
+            logger.warning("SpeechBrain not found. Voiceprint extraction will be skipped.")
 
         self._loaded = True
         vram_gb = torch.cuda.memory_allocated() / 1e9
@@ -123,9 +141,16 @@ class ASRPipeline:
 
         if return_speaker_turns:
             try:
-                result["speaker_turns"] = self._diarize(wav_path, transcript, word_ts)
+                turns = self._diarize(wav_path, transcript, word_ts)
+                result["speaker_turns"] = turns
+                
+                # Estrazione Voiceprints con Pooling
+                if self.voiceprint_encoder:
+                    logger.info("Extracting pooled voiceprints for detected speakers...")
+                    result["voiceprints"] = self._extract_voiceprints(wav_path, turns)
+                
             except Exception as exc:
-                logger.warning("Diarization skip: %s", exc)
+                logger.warning("Diarization/Voiceprint skip: %s", exc)
                 result["speaker_turns"] = [
                     {
                         "speaker": "SPEAKER_00",
@@ -136,6 +161,57 @@ class ASRPipeline:
                 ]
 
         return result
+
+    def _extract_voiceprints(self, wav_path: str, turns: list[dict]) -> dict[str, list[float]]:
+        """
+        Estrae un unico embedding (pooling) per ogni speaker nel file audio.
+        """
+        try:
+            audio, fs = sf.read(wav_path)
+            if fs != 16000:
+                # SpeechBrain richiede 16kHz
+                import librosa
+                audio = librosa.resample(audio, orig_sr=fs, target_sr=16000)
+                fs = 16000
+            
+            speaker_samples = {}
+            for turn in turns:
+                spk = turn["speaker"]
+                if spk not in speaker_samples:
+                    speaker_samples[spk] = []
+                
+                # Estrazione del ritaglio (crop)
+                start_sample = int((turn["start_ms"] / 1000) * fs)
+                end_sample = int((turn["end_ms"] / 1000) * fs)
+                crop = audio[start_sample:end_sample]
+                
+                # Consideriamo solo segmenti con un minimo di sostanza (> 0.5s)
+                if len(crop) > 8000:
+                    speaker_samples[spk].append(crop)
+            
+            voiceprints = {}
+            for spk, samples in speaker_samples.items():
+                if not samples: continue
+                
+                # Concatenazione dei segmenti dello stesso speaker (Pooling)
+                concatenated = np.concatenate(samples)
+                
+                # Limitiamo a max 30 secondi di parlato per speaker per evitare OOM o eccessiva lentezza
+                if len(concatenated) > 16000 * 30:
+                    concatenated = concatenated[:16000 * 30]
+                
+                # Calcolo Embedding
+                with torch.no_grad():
+                    signal = torch.tensor(concatenated).unsqueeze(0).to(torch.device("cuda"))
+                    embeddings = self.voiceprint_encoder.encode_batch(signal)
+                    # Flatten e conversione in lista per JSON
+                    vector = embeddings.squeeze().cpu().numpy().tolist()
+                    voiceprints[spk] = vector
+                    
+            return voiceprints
+        except Exception as e:
+            logger.error("Error in voiceprint extraction: %s", e)
+            return {}
 
     def _diarize(self, wav_path: str, transcript: str, word_timestamps: list) -> list[dict]:
         diarization = self.diarizer({"uri": "segment", "audio": wav_path})
