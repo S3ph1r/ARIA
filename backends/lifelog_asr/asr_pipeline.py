@@ -86,15 +86,24 @@ class ASRPipeline:
         duration_ms = int(len(audio) / sr * 1000)
 
         logger.info(f"Transcribing: {wav_path}")
+        
+        # Mapping ISO -> Qwen3 Names (evita errore Unsupported language: It)
+        lang_map = {
+            "it": "Italian", "en": "English", "zh": "Chinese", 
+            "es": "Spanish", "fr": "French", "de": "German",
+            "ja": "Japanese", "ko": "Korean", "ru": "Russian"
+        }
+        q_lang = lang_map.get(language.lower(), language) if language else None
+
         results = self.asr_pipeline.transcribe(
             audio=wav_path,
-            language=language,
+            language=q_lang,
             return_time_stamps=return_timestamps
         )
         
         main_res = results[0]
         transcript = main_res.text
-        detected_lang = main_res.language or language or "it"
+        detected_lang = main_res.language or q_lang or "Italian"
 
         result: dict = {
             "transcript": transcript,

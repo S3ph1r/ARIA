@@ -20,6 +20,7 @@ import re
 from .models import AriaTaskResult
 from .registry_manager import AriaRegistryManager
 from .telemetry import TelemetryDB
+from . import config_manager
 
 class AriaAssetHandler(http.server.SimpleHTTPRequestHandler):
     """
@@ -329,6 +330,12 @@ class ModelProcessManager:
                     # Blocca download HuggingFace: i modelli sono già disponibili via junction NTFS
                     env["HF_HUB_OFFLINE"] = "1"
                     env["TRANSFORMERS_OFFLINE"] = "1"
+
+                    # Iniezione Credenziali MinIO da Config Manager
+                    env["ARIA_MINIO_ENDPOINT"] = config_manager.MINIO_ENDPOINT
+                    env["ARIA_MINIO_ACCESS_KEY"] = config_manager.MINIO_ACCESS_KEY
+                    env["ARIA_MINIO_SECRET_KEY"] = config_manager.MINIO_SECRET_KEY
+                    logger.info(f"Injected MinIO credentials for {model_id} (Endpoint: {config_manager.MINIO_ENDPOINT})")
 
                     # Su Windows, Popen con shell=True e 'start' vuole una stringa dove:
                     # 1. 'start' vuole il titolo tra virgolette
