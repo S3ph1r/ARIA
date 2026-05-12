@@ -1,7 +1,7 @@
 """
 ARIA — Lifelog LLM Backend Client
 
-Calls backends/lifelog_llm/server.py (OpenAI-compatible) on port 8089.
+Calls llama-server.exe (OpenAI-compatible) on port 8089.
 Used by the orchestrator to dispatch enrichment tasks from Lifelog2.
 """
 
@@ -21,8 +21,8 @@ class LifelogLLMBackend:
 
     def is_loaded(self) -> bool:
         try:
-            r = requests.get(f"http://127.0.0.1:{LIFELOG_LLM_PORT}/v1/health", timeout=2)
-            return r.status_code == 200 and r.json().get("status") == "ready"
+            r = requests.get(f"http://127.0.0.1:{LIFELOG_LLM_PORT}/health", timeout=2)
+            return r.status_code == 200 and r.json().get("status") == "ok"
         except Exception:
             return False
 

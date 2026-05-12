@@ -87,7 +87,7 @@
     "qwen3-14b-q4km": {
       "metadata": {
         "display_name": "Qwen3-14B Q4_K_M",
-        "description": "LLM testuale denso per enrichment Lifelog2. 14B param, 9GB VRAM, 7GB headroom KV cache. Ottimale per trascrizioni lunghe.",
+        "description": "LLM testuale denso per enrichment Lifelog2. 14B param, 9GB VRAM, 7GB headroom KV cache. Ottimale per trascrizioni lunghe. Avviato via llama-server.exe (prebuilt CUDA 13.1, sm_120).",
         "capabilities": [
           "chat",
           "summarization",
@@ -96,16 +96,20 @@
         ]
       },
       "port": 8089,
-      "health_url": "http://localhost:8089/v1/health",
+      "health_url": "http://localhost:8089/health",
       "startup_wait": 120,
       "env_prefix": "envs/lifelog-llm",
-      "script": "backends/lifelog_llm/server.py",
+      "script": "backends/lifelog_llm/launcher.py",
       "args": [
-        "--model-path",
+        "-m",
         "data/assets/models/Qwen3-14B-Q4_K_M/Qwen3-14B-Q4_K_M.gguf",
         "--port",
         "8089",
-        "--n-ctx",
+        "--host",
+        "0.0.0.0",
+        "--n-gpu-layers",
+        "-1",
+        "--ctx-size",
         "16384"
       ]
     },

@@ -1,7 +1,2 @@
-llama-cpp-python
-fastapi
-uvicorn[standard]
-pydantic>=2.0
-requests
 huggingface_hub
 hf_transfer
