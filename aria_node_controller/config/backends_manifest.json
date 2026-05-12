@@ -95,8 +95,8 @@
           "text-enrichment"
         ]
       },
-      "port": 8089,
-      "health_url": "http://localhost:8089/health",
+      "port": 8090,
+      "health_url": "http://localhost:8090/health",
       "startup_wait": 120,
       "env_prefix": "envs/lifelog-llm",
       "script": "backends/lifelog_llm/launcher.py",
@@ -104,7 +104,7 @@
         "-m",
         "data/assets/models/Qwen3-14B-Q4_K_M/Qwen3-14B-Q4_K_M.gguf",
         "--port",
-        "8089",
+        "8090",
         "--host",
         "0.0.0.0",
         "--n-gpu-layers",

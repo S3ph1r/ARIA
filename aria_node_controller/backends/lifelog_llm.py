@@ -12,7 +12,7 @@ from pathlib import Path
 
 logger = logging.getLogger("aria.backend.lifelog_llm")
 
-LIFELOG_LLM_PORT = 8089
+LIFELOG_LLM_PORT = 8090
 
 
 class LifelogLLMBackend:
