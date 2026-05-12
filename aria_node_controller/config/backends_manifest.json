@@ -84,6 +84,31 @@
       "env_prefix": "envs/nh-qwen35-llm",
       "script": "backends/llm/server.py"
     },
+    "qwen3-14b-q4km": {
+      "metadata": {
+        "display_name": "Qwen3-14B Q4_K_M",
+        "description": "LLM testuale denso per enrichment Lifelog2. 14B param, 9GB VRAM, 7GB headroom KV cache. Ottimale per trascrizioni lunghe.",
+        "capabilities": [
+          "chat",
+          "summarization",
+          "entity-extraction",
+          "text-enrichment"
+        ]
+      },
+      "port": 8089,
+      "health_url": "http://localhost:8089/v1/health",
+      "startup_wait": 120,
+      "env_prefix": "envs/lifelog-llm",
+      "script": "backends/lifelog_llm/server.py",
+      "args": [
+        "--model-path",
+        "data/assets/models/Qwen3-14B-Q4_K_M/Qwen3-14B-Q4_K_M.gguf",
+        "--port",
+        "8089",
+        "--n-ctx",
+        "16384"
+      ]
+    },
     "sox": {
       "metadata": {
         "display_name": "SoX Audio Engine",

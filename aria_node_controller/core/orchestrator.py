@@ -68,6 +68,7 @@ class AriaAssetHandler(http.server.SimpleHTTPRequestHandler):
 try:
     from backends.qwen3_tts import Qwen3TTSBackend
     from backends.qwen35_llm import Qwen35LLMBackend
+    from backends.lifelog_llm import LifelogLLMBackend
     from backends.acestep import ACEStepBackend
     from backends.audiocraft import AudiocraftBackend
     from backends.lifelog_asr import LifelogASRBackend
@@ -78,6 +79,7 @@ except ImportError:
     try:
         from ..backends.qwen3_tts import Qwen3TTSBackend
         from ..backends.qwen35_llm import Qwen35LLMBackend
+        from ..backends.lifelog_llm import LifelogLLMBackend
         from ..backends.acestep import ACEStepBackend
         from ..backends.audiocraft import AudiocraftBackend
         from ..backends.lifelog_asr import LifelogASRBackend
@@ -88,6 +90,7 @@ except ImportError:
         _BACKENDS_AVAILABLE = False
         HAS_ACESTEP = False
         HAS_AUDIOCRAFT = False
+        LifelogLLMBackend = None
 
 
 logger = get_logger("node.orchestrator")
@@ -500,6 +503,7 @@ class NodeOrchestrator:
         # Backend lazy instances
         self._qwen3_backend = Qwen3TTSBackend() if _BACKENDS_AVAILABLE else None
         self._qwen35_backend = Qwen35LLMBackend() if _BACKENDS_AVAILABLE else None
+        self._lifelog_llm_backend = LifelogLLMBackend() if _BACKENDS_AVAILABLE else None
         self._acestep_backend    = ACEStepBackend() if HAS_ACESTEP else None
         self._audiocraft_backend = AudiocraftBackend() if HAS_AUDIOCRAFT else None
         self._asr_backend        = LifelogASRBackend() if _BACKENDS_AVAILABLE else None
@@ -648,7 +652,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "acestep-1.5-xl-sft", "qwen3-asr-1.7b"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b"]
         current_model = None
 
         last_heartbeat = 0
@@ -795,6 +799,8 @@ class NodeOrchestrator:
             self._process_acestep_task(task, start_t)
         elif task.model_id == "qwen3.5-35b-moe-q3ks":
             self._process_llm_task(task, start_t)
+        elif task.model_id == "qwen3-14b-q4km":
+            self._process_lifelog_llm_task(task, start_t)
         elif task.model_id == "qwen3-asr-1.7b" or task.model_type == "stt":
             self._process_asr_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
@@ -1077,6 +1083,49 @@ class NodeOrchestrator:
             )
             self.qm.post_result(task, result)
 
+
+    def _process_lifelog_llm_task(self, task, start_t: float):
+        """Dispatch di un task LLM enrichment verso LifelogLLMBackend (Qwen3-14B Q4_K_M, porta 8089)."""
+        if not self._lifelog_llm_backend:
+            raise RuntimeError("LifelogLLMBackend non disponibile.")
+
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend Lifelog LLM per {task.model_id}")
+
+        try:
+            result_data = self._lifelog_llm_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip,
+            )
+            duration_s = time.time() - start_t
+
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output={
+                    "text":     result_data["text"],
+                    "thinking": result_data.get("thinking"),
+                    "usage":    result_data.get("usage"),
+                },
+            )
+            self.qm.post_result(task, result)
+        except Exception as e:
+            logger.error("Lifelog LLM task failed: %s", e, exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e),
+            )
+            self.qm.post_result(task, result)
 
     def _merge_wavs(self, audio_parts: list) -> bytes:
         """Merge wav chunks and inject silences. Assumes same format/samplerate from the first WAV part."""
