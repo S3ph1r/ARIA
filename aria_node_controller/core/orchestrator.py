@@ -1085,7 +1085,7 @@ class NodeOrchestrator:
 
 
     def _process_lifelog_llm_task(self, task, start_t: float):
-        """Dispatch di un task LLM enrichment verso LifelogLLMBackend (Qwen3-14B Q4_K_M, porta 8089)."""
+        """Dispatch di un task LLM enrichment verso LifelogLLMBackend (Qwen3-14B Q4_K_M, porta 8090)."""
         if not self._lifelog_llm_backend:
             raise RuntimeError("LifelogLLMBackend non disponibile.")
 
