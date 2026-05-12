@@ -75,7 +75,7 @@ if (-not (Test-Path $MODEL_DIR)) { New-Item -ItemType Directory -Path $MODEL_DIR
 $gguf = "$MODEL_DIR\Qwen3-14B-Q4_K_M.gguf"
 if (-not (Test-Path $gguf)) {
     $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
-    & "$ENV_PATH\Scripts\huggingface-cli.exe" download `
+    & "$ENV_PATH\Scripts\hf.exe" download `
         unsloth/Qwen3-14B-GGUF `
         --include "Qwen3-14B-Q4_K_M.gguf" `
         --local-dir $MODEL_DIR 2>&1 | Tee-Object -Append $LOG_PATH
