@@ -45,10 +45,10 @@ class LifelogLLMBackend:
             "stream":      False,
         }
 
-        # Disable thinking mode if caller requests it
+        # Disable thinking mode: inject /no_think system prompt for Qwen3
         if payload.get("thinking") is False:
-            request_body["temperature"] = 0.6
-            request_body["top_k"] = 1
+            if not any(m.get("role") == "system" for m in request_body["messages"]):
+                request_body["messages"] = [{"role": "system", "content": "/no_think"}] + request_body["messages"]
 
         timeout = payload.get("timeout_seconds", 300)
         url = f"http://{local_ip}:{LIFELOG_LLM_PORT}/v1/chat/completions"
@@ -60,13 +60,18 @@ class LifelogLLMBackend:
             resp.raise_for_status()
             data = resp.json()
 
-            content = data["choices"][0]["message"]["content"]
-            thinking, text = "", content
+            msg = data["choices"][0]["message"]
+            # llama-server returns thinking in reasoning_content (separate field),
+            # content holds only the visible answer
+            text = msg.get("content", "") or ""
+            thinking = msg.get("reasoning_content", "") or ""
 
-            m = re.search(r"<think>(.*?)</think>", content, re.DOTALL | re.IGNORECASE)
-            if m:
-                thinking = m.group(1).strip()
-                text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+            # Fallback: parse <think> tags if server embeds them in content
+            if not thinking and text:
+                m = re.search(r"<think>(.*?)</think>", text, re.DOTALL | re.IGNORECASE)
+                if m:
+                    thinking = m.group(1).strip()
+                    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
             return {
                 "text":     text,
