@@ -28,7 +28,8 @@ Aggiornato ad ogni modifica architetturale significativa.
 | ACE-Step 1.5 XL SFT | 8084 | `envs/dias-sound-engine` | `backends/acestep/aria_wrapper_server.py` | ✅ Operativo | ~8 GB |
 | Qwen3.5 35B MoE | 8085 | `envs/nh-qwen35-llm` | `backends/llm/server.py` | ✅ Operativo | ~13-14 GB |
 | Audiocraft (AudioGen+MusicGen) | 8086 | `envs/dias-sound-engine` | `backends/audiocraft/aria_audiocraft_server.py` | ✅ Operativo | ~4-6 GB |
-| Lifelog ASR (Qwen3-ASR-1.7B) | 8087 | `envs/lifelog-asr` | `backends/lifelog_asr/server.py` | 🔧 In setup | ~9 GB |
+| Lifelog ASR (Qwen3-ASR-1.7B) | 8087 | `envs/lifelog-asr` | `backends/lifelog_asr/server.py` | ✅ Operativo | ~9 GB |
+| Lifelog LLM (qwen3-14b-q4km) | 8090 | `envs/lifelog-llm` | `llama-server.exe` b9119 (CUDA 13.1 sm_120) | ✅ Operativo | ~9 GB |
 
 > I backend su porta 8084 e 8086 condividono lo stesso ambiente `dias-sound-engine` ma sono processi distinti avviati in momenti diversi — mai in contemporanea per gestione VRAM.
 
@@ -47,6 +48,7 @@ Tutte le code seguono il pattern: `aria:q:{type}:local:{model_id}:{client_id}`
 | `aria:q:llm:local:qwen3.5-35b-moe-q3ks:dias` | Qwen3.5 35B (8085) | LLM ragionamento | DIAS |
 | `aria:q:mus:local:acestep-1.5-xl-sft:dias` | Orchestratore | Musica/Suono (PAD, AMB, SFX, STING, Leitmotif) | DIAS |
 | `aria:q:stt:local:qwen3-asr-1.7b:lifelog` | Lifelog ASR (8087) | Trascrizione audio + diarizzazione | Lifelog2 |
+| `aria:q:llm:local:qwen3-14b-q4km:lifelog` | Lifelog LLM (8090) | LLM enrichment — MemoryAtom extraction | Lifelog2 |
 | `aria:q:cloud:*` | CloudManager | Gemini API (fallback) | vari |
 
 > La coda `aria:q:mus:local:acestep-1.5-xl-sft:dias` gestisce **tutti** i task audio. Il routing interno (ACE-Step vs Audiocraft) avviene tramite il campo `model_id` nel payload:

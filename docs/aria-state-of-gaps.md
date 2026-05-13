@@ -58,6 +58,20 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 
 ## Gap Risolti
 
+### A0-3 — Nessun backend LLM dedicato per Lifelog2 Stage D
+**Stato:** resolved  
+**Risolto:** 2026-05-13  
+**Descrizione:** Lifelog2 Stage D richiedeva un modello LLM per estrarre MemoryAtom (summary, topics, entities, speaker_turns_annotated) da trascrizioni. Il backend LLM esistente (qwen3.5-35b-moe @ 8085) era dimensionato per DIAS, non per Lifelog. Necessario backend dedicato, più leggero, per operazioni di enrichment.  
+**Soluzione adottata:**
+- Env `lifelog-llm` su PC139 (Blackwell RTX 5060 Ti 16GB, sm_120)
+- Modello: `qwen3-14b-q4km` via `llama-server.exe` build b9119 (CUDA 13.1, sm_120 native)
+- Porta 8090, `/health` endpoint, prompt cache 8192 MiB
+- Coda Redis: `aria:q:llm:local:qwen3-14b-q4km:lifelog`
+- Timeout 600s (BatchOptimizer carica ASR prima se ci sono task in coda — competizione cold start)
+- E2E testato: 21 segmenti → 21 MemoryAtom, timing ~17-21s per inferenza (warm)
+
+---
+
 ### A0-2 — Nessun backend STT/ASR disponibile per Lifelog2
 **Stato:** resolved  
 **Risolto:** 2026-05-07  
