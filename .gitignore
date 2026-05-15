@@ -23,3 +23,7 @@ Qwen3
 Qwen3/
 Voice
 Voice/
+procs.txt 
+*.log 
+ports.txt 
+tools/ 

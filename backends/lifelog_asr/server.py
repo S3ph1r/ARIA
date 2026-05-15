@@ -5,11 +5,41 @@ Started JIT by ARIA orchestrator on first Lifelog2 task.
 """
 
 import os
-
-# SOLUZIONE ATOMICA PER BLACKWELL (sm_120) + PYTORCH 2.11
-os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-
+import sys
 import logging
+
+# CONFIGURAZIONE AMBIENTE HF - DEVE ESSERE PRIMA DI OGNI ALTRO IMPORT
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["HF_HOME"] = r"C:\Users\Roberto\aria\data\assets\models\huggingface"
+os.makedirs(os.environ["HF_HOME"], exist_ok=True)
+
+import torchaudio
+import torch
+import soundfile as sf
+from types import ModuleType
+from dotenv import load_dotenv
+from huggingface_hub import login
+
+# Carica variabili d'ambiente da .env (per HF_TOKEN e credenziali MinIO)
+load_dotenv()
+
+hf_token = os.getenv("HF_TOKEN")
+if hf_token:
+    try:
+        login(token=hf_token)
+    except Exception as e:
+        logging.warning("HF Login failed (offline?): %s", e)
+
+# MONKEYPATCH TORCHAUDIO PER COMPATIBILITÀ CON SPEECHBRAIN (usato internamente da pyannote.audio)
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["ffmpeg"]
+
+if not hasattr(torchaudio, "io"):
+    io_mock = ModuleType("torchaudio.io")
+    io_mock.StreamReader = object
+    torchaudio.io = io_mock
+    sys.modules["torchaudio.io"] = io_mock
+
 import time
 import tempfile
 import re
@@ -24,18 +54,34 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from minio import Minio
 
-from asr_pipeline import ASRPipeline
+try:
+    from .asr_pipeline import ASRPipeline
+except ImportError:
+    from asr_pipeline import ASRPipeline
+
+# Configurazione Logging (Console + File) - Forziamo la scrittura per bypassare uvicorn
+LOG_FILE = r"C:\Users\Roberto\aria\logs\lifelog_asr.log"
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+# Pulizia handler esistenti per evitare duplicati o blocchi
+logging.root.handlers = []
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding='utf-8')
+    ],
+    force=True # Disponibile da Python 3.8+, forza questa config
 )
 logger = logging.getLogger(__name__)
+logger.info("Logging inizializzato correttamente (File: %s)", LOG_FILE)
 
 pipeline = ASRPipeline()
 
 # MinIO Client Configuration from Environment (Injected by ARIA Orchestrator)
-MINIO_ENDPOINT = os.getenv("ARIA_MINIO_ENDPOINT", "192.168.1.104:9000")
+MINIO_ENDPOINT = os.getenv("ARIA_MINIO_ENDPOINT", "localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("ARIA_MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("ARIA_MINIO_SECRET_KEY", "minioadmin")
 

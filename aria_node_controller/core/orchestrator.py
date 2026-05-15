@@ -72,6 +72,7 @@ try:
     from backends.acestep import ACEStepBackend
     from backends.audiocraft import AudiocraftBackend
     from backends.lifelog_asr import LifelogASRBackend
+    from backends.lifelog_whisperx import LifelogWhisperXBackend
     _BACKENDS_AVAILABLE = True
     HAS_ACESTEP = True
     HAS_AUDIOCRAFT = True
@@ -83,6 +84,7 @@ except ImportError:
         from ..backends.acestep import ACEStepBackend
         from ..backends.audiocraft import AudiocraftBackend
         from ..backends.lifelog_asr import LifelogASRBackend
+        from ..backends.lifelog_whisperx import LifelogWhisperXBackend
         _BACKENDS_AVAILABLE = True
         HAS_ACESTEP = True
         HAS_AUDIOCRAFT = True
@@ -166,7 +168,7 @@ class ModelProcessManager:
         self._procs: dict[str, subprocess.Popen] = {}
         self._idle_since: dict[str, float]        = {}
         self._starting: set[str]                  = set()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock: _ensure_single holds it while calling _kill_proc
 
         # Caricamento Manifest dei Backend
         self.MODEL_CONFIGS = self._load_manifest()
@@ -262,7 +264,10 @@ class ModelProcessManager:
                 for mid in self.MODEL_CONFIGS.keys():
                     if mid != model_id:
                         title = f"ARIA Backend: {mid}"
-                        subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True)
+                        try:
+                            subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True, timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
 
             # 1. Controllo proattivo...
             if self._health_check(model_id):
@@ -423,7 +428,7 @@ class ModelProcessManager:
                     # Siccome abbiamo lanciato con 'start cmd', il Popen originale è solo
                     # l'esecutore 'start'. Dobbiamo killare l'albero processi reale dal titolo.
                     title = f"ARIA Backend: {model_id}"
-                    subprocess.run(f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True)
+                    subprocess.run(f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True, timeout=5)
                 else:
                     proc.terminate()
                     try:
@@ -450,7 +455,10 @@ class ModelProcessManager:
         if os.name == 'nt':
             for model_id in self.MODEL_CONFIGS.keys():
                 title = f"ARIA Backend: {model_id}"
-                subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True)
+                try:
+                    subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {title}*"', shell=True, capture_output=True, timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
         self._procs.clear()
         self._idle_since.clear()
@@ -507,6 +515,7 @@ class NodeOrchestrator:
         self._acestep_backend    = ACEStepBackend() if HAS_ACESTEP else None
         self._audiocraft_backend = AudiocraftBackend() if HAS_AUDIOCRAFT else None
         self._asr_backend        = LifelogASRBackend() if _BACKENDS_AVAILABLE else None
+        self._whisperx_backend   = LifelogWhisperXBackend() if _BACKENDS_AVAILABLE else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
@@ -565,13 +574,17 @@ class NodeOrchestrator:
 
     def stop(self):
         self.running = False
-        
+
         logger.info("--- SHUTDOWN SEQUENCE STARTED ---")
-        
+
+        # Give _run_loop time to exit its current iteration before we touch shared state
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=4)
+
         # 1. Stop dei manager logici
         logger.info("[1/5] Stopping CloudManager...")
         self.cloud_manager.stop()            # ferma il loop cloud
-        
+
         logger.info("[2/5] Shutting down AI Backends...")
         self.process_manager.shutdown_all()   # termina tutti i backend locali
         
@@ -652,7 +665,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b", "whisperx-large-v3"]
         current_model = None
 
         last_heartbeat = 0
@@ -801,7 +814,7 @@ class NodeOrchestrator:
             self._process_llm_task(task, start_t)
         elif task.model_id == "qwen3-14b-q4km":
             self._process_lifelog_llm_task(task, start_t)
-        elif task.model_id == "qwen3-asr-1.7b" or task.model_type == "stt":
+        elif task.model_id in ("qwen3-asr-1.7b", "whisperx-large-v3") or task.model_type == "stt":
             self._process_asr_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
             try:
@@ -1261,15 +1274,20 @@ class NodeOrchestrator:
             self.qm.post_result(task, result)
 
     def _process_asr_task(self, task, start_t: float):
-        """Dispatch di un task STT verso LifelogASRBackend."""
-        if not self._asr_backend:
-            raise RuntimeError("LifelogASRBackend non disponibile.")
+        """Dispatch di un task STT verso il backend appropriato (qwen3-asr o whisperx)."""
+        if task.model_id == "whisperx-large-v3":
+            backend = self._whisperx_backend
+        else:
+            backend = self._asr_backend
+
+        if not backend:
+            raise RuntimeError(f"Backend STT non disponibile per {task.model_id}.")
 
         if not self.process_manager.ensure_running(task.model_id):
             raise RuntimeError(f"Impossibile avviare il backend ASR per {task.model_id}")
 
         try:
-            result_data = self._asr_backend.run(
+            result_data = backend.run(
                 payload=task.payload,
                 aria_root=ARIA_ROOT,
                 local_ip=self.local_ip,

@@ -1,32 +1,44 @@
 import os
-
-# SOLUZIONE ATOMICA PER BLACKWELL (sm_120) + PYTORCH 2.11
-# Disabilita il controllo 'weights_only' che causa pickle.UnpicklingError su Pyannote.
-# Deve essere impostata PRIMA di importare torch.
-os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-
+import sys
 import logging
 import torch
+import torchaudio
+from types import ModuleType
+
+# MONKEYPATCH TORCHAUDIO PER COMPATIBILITÀ CON SPEECHBRAIN (usato internamente da pyannote.audio)
+# 1. list_audio_backends (rimosso in Torchaudio 2.11)
+if not hasattr(torchaudio, 'list_audio_backends'):
+    torchaudio.list_audio_backends = lambda: ['ffmpeg']
+
+# 2. io (StreamReader) - Mock per evitare crash all'import di SpeechBrain.inference.ASR
+if not hasattr(torchaudio, 'io'):
+    io_mock = ModuleType('torchaudio.io')
+    io_mock.StreamReader = object
+    io_mock.AudioDecoder = object
+    torchaudio.io = io_mock
+    sys.modules['torchaudio.io'] = io_mock
+
 import numpy as np
 import soundfile as sf
 import warnings
 import gc
 
+# SOLUZIONE ATOMICA PER BLACKWELL (sm_120) + PYTORCH 2.11
+# Disabilita il controllo 'weights_only' che causa pickle.UnpicklingError su Pyannote.
+os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 # Soppressione warning per terminale pulito (Blackwell Optimized)
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.core.io")
 warnings.filterwarnings("ignore", message="triton not found")
 
-# Import specifici per Qwen3-ASR
+# Import specifici per Qwen3-ASR e Pyannote
 try:
     from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
 except ImportError:
     Qwen3ASRModel = None
 
-try:
-    from speechbrain.inference.speaker import EncoderClassifier
-except ImportError:
-    EncoderClassifier = None
+from pyannote.audio import Pipeline, Model, Inference
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +47,6 @@ MODEL_DIR = r"C:\Users\Roberto\aria\data\assets\models"
 ASR_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-asr-1.7b")
 ALIGNER_MODEL_PATH = os.path.join(MODEL_DIR, "qwen3-forced-aligner-0.6b")
 PYANNOTE_CONFIG = os.path.join(MODEL_DIR, "pyannote", "config.yaml")
-SPEECHBRAIN_DIR = os.path.join(MODEL_DIR, "speechbrain")
 
 class ASRPipeline:
     def __init__(self):
@@ -62,21 +73,27 @@ class ASRPipeline:
         )
 
         # Caricamento Diarizzatore
+        hf_token = os.getenv("HF_TOKEN")
         logger.info("Loading pyannote diarization (Standard ACE-Step Stack Compatibility)...")
-        from pyannote.audio import Pipeline
-        self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
-        self.diarizer = self.diarizer.to(torch.device("cuda"))
+        try:
+            # Usiamo il login globale effettuato in server.py
+            self.diarizer = Pipeline.from_pretrained(PYANNOTE_CONFIG)
+            if self.diarizer and torch.cuda.is_available():
+                self.diarizer = self.diarizer.to(torch.device("cuda"))
+        except Exception as e:
+            logger.warning("Failed to load pyannote diarization: %s. Diarization will be skipped.", e)
+            self.diarizer = None
 
-        # Caricamento Voiceprint Encoder (SpeechBrain)
-        if EncoderClassifier:
-            logger.info("Loading SpeechBrain ECAPA-TDNN (192d Voiceprint)...")
-            self.voiceprint_encoder = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir=SPEECHBRAIN_DIR,
-                run_opts={"device": "cuda"}
-            )
-        else:
-            logger.warning("SpeechBrain not found. Voiceprint extraction will be skipped.")
+        # Caricamento Voiceprint Encoder (Pyannote Native Embedding - ResNet34)
+        logger.info("Loading Pyannote Embedding (wespeaker-voxceleb-resnet34-LM)...")
+        try:
+            # Usiamo il login globale effettuato in server.py
+            emb_model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM")
+            self.voiceprint_encoder = Inference(emb_model, window="whole", device=torch.device("cuda"))
+            logger.info("Pyannote Embedding loaded (256d vectors).")
+        except Exception as e:
+            logger.warning("Failed to load Pyannote Embedding model: %s. Voiceprint extraction will be skipped.", e)
+            self.voiceprint_encoder = None
 
         self._loaded = True
         vram_gb = torch.cuda.memory_allocated() / 1e9
@@ -85,7 +102,7 @@ class ASRPipeline:
     def unload(self):
         if not self._loaded:
             return
-        del self.asr_pipeline, self.diarizer
+        del self.asr_pipeline, self.diarizer, self.voiceprint_encoder
         gc.collect()
         torch.cuda.empty_cache()
         self._loaded = False
@@ -100,8 +117,17 @@ class ASRPipeline:
         if not self._loaded:
             self.load()
 
-        audio, sr = sf.read(wav_path)
-        duration_ms = int(len(audio) / sr * 1000)
+        # Caricamento audio con soundfile (più robusto di torchaudio su Windows/Blackwell)
+        try:
+            audio_data, sr = sf.read(wav_path)
+            waveform = torch.from_numpy(audio_data).float()
+            if waveform.ndim > 1:
+                waveform = waveform.mean(dim=1)  # Mixdown to mono
+            waveform = waveform.unsqueeze(0)  # (1, num_samples)
+        except Exception as e:
+            logger.error("Error loading audio with soundfile: %s. Falling back to torchaudio.", e)
+            waveform, sr = torchaudio.load(wav_path)
+        duration_ms = int(waveform.shape[1] / sr * 1000)
 
         logger.info(f"Transcribing: {wav_path}")
         
@@ -141,13 +167,14 @@ class ASRPipeline:
 
         if return_speaker_turns:
             try:
-                turns = self._diarize(wav_path, transcript, word_ts)
+                # Passiamo direttamente waveform e sr caricati con soundfile per evitare crash di torchaudio interni a pyannote
+                turns = self._diarize(waveform, sr, transcript, word_ts)
                 result["speaker_turns"] = turns
                 
-                # Estrazione Voiceprints con Pooling
+                # Estrazione Voiceprints con Pooling (Native Pyannote)
                 if self.voiceprint_encoder:
                     logger.info("Extracting pooled voiceprints for detected speakers...")
-                    result["voiceprints"] = self._extract_voiceprints(wav_path, turns)
+                    result["voiceprints"] = self._extract_voiceprints(waveform, sr, turns)
                 
             except Exception as exc:
                 logger.warning("Diarization/Voiceprint skip: %s", exc)
@@ -162,59 +189,68 @@ class ASRPipeline:
 
         return result
 
-    def _extract_voiceprints(self, wav_path: str, turns: list[dict]) -> dict[str, list[float]]:
+    def _extract_voiceprints(self, waveform: torch.Tensor, sr: int, turns: list[dict]) -> dict[str, list[float]]:
         """
-        Estrae un unico embedding (pooling) per ogni speaker nel file audio.
+        Estrae un unico embedding (pooling) per ogni speaker nel file audio usando Pyannote Inference.
         """
         try:
-            audio, fs = sf.read(wav_path)
-            if fs != 16000:
-                # SpeechBrain richiede 16kHz
-                import librosa
-                audio = librosa.resample(audio, orig_sr=fs, target_sr=16000)
-                fs = 16000
+            # Resampling a 16kHz se necessario (Pyannote standard)
+            if sr != 16000:
+                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                waveform = resampler(waveform)
+                sr = 16000
             
-            speaker_samples = {}
+            speaker_tensors = {}
             for turn in turns:
                 spk = turn["speaker"]
-                if spk not in speaker_samples:
-                    speaker_samples[spk] = []
+                if spk not in speaker_tensors:
+                    speaker_tensors[spk] = []
                 
-                # Estrazione del ritaglio (crop)
-                start_sample = int((turn["start_ms"] / 1000) * fs)
-                end_sample = int((turn["end_ms"] / 1000) * fs)
-                crop = audio[start_sample:end_sample]
+                start_sample = int((turn["start_ms"] / 1000) * sr)
+                end_sample = int((turn["end_ms"] / 1000) * sr)
+                
+                # Crop del tensore
+                crop = waveform[:, start_sample:end_sample]
                 
                 # Consideriamo solo segmenti con un minimo di sostanza (> 0.5s)
-                if len(crop) > 8000:
-                    speaker_samples[spk].append(crop)
+                if crop.shape[1] > 8000:
+                    speaker_tensors[spk].append(crop)
             
             voiceprints = {}
-            for spk, samples in speaker_samples.items():
-                if not samples: continue
+            for spk, tensors in speaker_tensors.items():
+                if not tensors: continue
                 
-                # Concatenazione dei segmenti dello stesso speaker (Pooling)
-                concatenated = np.concatenate(samples)
+                # Concatenazione dei segmenti (Pooling)
+                concatenated = torch.cat(tensors, dim=1)
                 
-                # Limitiamo a max 30 secondi di parlato per speaker per evitare OOM o eccessiva lentezza
-                if len(concatenated) > 16000 * 30:
-                    concatenated = concatenated[:16000 * 30]
+                # Limitiamo a max 30 secondi per speaker per efficienza VRAM
+                if concatenated.shape[1] > sr * 30:
+                    concatenated = concatenated[:, :sr * 30]
                 
-                # Calcolo Embedding
+                # Calcolo Embedding con Pyannote Inference
+                # Pyannote Inference({"waveform": ..., "sample_rate": ...}) accetta tensori (C, T)
                 with torch.no_grad():
-                    signal = torch.tensor(concatenated).unsqueeze(0).to(torch.device("cuda"))
-                    embeddings = self.voiceprint_encoder.encode_batch(signal)
-                    # Flatten e conversione in lista per JSON
-                    vector = embeddings.squeeze().cpu().numpy().tolist()
-                    voiceprints[spk] = vector
+                    embedding = self.voiceprint_encoder({"waveform": concatenated, "sample_rate": sr})
+                    # Conversione in lista per JSON
+                    voiceprints[spk] = embedding.tolist()
                     
             return voiceprints
         except Exception as e:
             logger.error("Error in voiceprint extraction: %s", e)
             return {}
 
-    def _diarize(self, wav_path: str, transcript: str, word_timestamps: list) -> list[dict]:
-        diarization = self.diarizer({"uri": "segment", "audio": wav_path})
+    def _diarize(self, waveform: torch.Tensor, sr: int, transcript: str, word_timestamps: list) -> list[dict]:
+        # Passiamo il waveform tensor invece del path per bypassare i problemi di loading di torchaudio
+        res = self.diarizer({"waveform": waveform, "sample_rate": sr})
+        
+        # Supporto per Pyannote 4.x (restituisce un oggetto DiarizeOutput con diversi attributi)
+        if hasattr(res, "speaker_diarization"):
+            diarization = res.speaker_diarization
+        elif hasattr(res, "annotation"):
+            diarization = res.annotation
+        else:
+            diarization = res
+        
         turns = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):
             start_ms = int(turn.start * 1000)
@@ -235,3 +271,4 @@ class ASRPipeline:
                 }
             )
         return turns
+

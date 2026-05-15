@@ -188,6 +188,24 @@
       "startup_wait": 180,
       "env_prefix": "envs/lifelog-asr",
       "script": "backends/lifelog_asr/server.py"
+    },
+    "whisperx-large-v3": {
+      "metadata": {
+        "display_name": "WhisperX large-v3",
+        "description": "Backend trascrizione+diarizzazione per Lifelog2. WhisperX large-v3 (float16, Blackwell-safe) + align ITA + pyannote community-1.",
+        "capabilities": [
+          "stt",
+          "diarization",
+          "word-timestamps",
+          "speaker-labels",
+          "italian"
+        ]
+      },
+      "port": 8091,
+      "health_url": "http://localhost:8091/health",
+      "startup_wait": 150,
+      "env_prefix": "envs/lifelog-whisperx",
+      "script": "backends/lifelog_whisperx/server.py"
     }
   }
 }
