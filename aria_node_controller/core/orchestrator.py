@@ -665,7 +665,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b", "whisperx-large-v3"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b", "whisperx-large-v3", "flux2-klein-4b"]
         current_model = None
 
         last_heartbeat = 0

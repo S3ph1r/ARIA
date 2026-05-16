@@ -207,6 +207,22 @@
       "startup_wait": 150,
       "env_prefix": "envs/lifelog-whisperx",
       "script": "backends/lifelog_whisperx/server.py"
+    },
+    "flux2-klein-4b": {
+      "metadata": {
+        "display_name": "FLUX.2-klein 4B",
+        "description": "Backend image generation per copertine episodi Lifelog2. Flux2KleinPipeline (diffusers ≥0.37.0.dev0) + text encoder Qwen3-4B INT8 (optimum-quanto, 3.75 GB VRAM) + transformer BF16 (~11 GB VRAM totale su RTX 5060 Ti 16 GB). Output PNG → MinIO warehouse.",
+        "capabilities": [
+          "image-generation",
+          "text-to-image",
+          "cover-generation"
+        ]
+      },
+      "port": 8092,
+      "health_url": "http://localhost:8092/health",
+      "startup_wait": 240,
+      "env_prefix": "envs/flux-aria",
+      "script": "backends/flux_imagegen/server.py"
     }
   }
 }
