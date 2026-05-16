@@ -14,6 +14,7 @@ import os
 import sys
 import logging
 
+os.environ.pop("HF_HUB_OFFLINE", None)  # orchestrator injects this; clear it so hf_hub can resolve local cache
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 # Add conda Library/bin to PATH so whisperx finds ffmpeg.exe (conda-forge puts it there)
