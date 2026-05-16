@@ -29,6 +29,7 @@ os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 WHISPER_MODEL_PATH = os.path.join(MODELS_DIR, "faster-whisper-large-v3")
 WESPEAKER_PATH     = os.path.join(MODELS_DIR, "pyannote", "wespeaker-voxceleb-resnet34-LM")
 ALIGN_CACHE_DIR    = os.path.join(MODELS_DIR, "whisperx-align")
+DIARIZE_MODEL_PATH = os.path.join(MODELS_DIR, "pyannote", "speaker-diarization-community-1")
 
 # Add conda Library/bin to PATH so whisperx finds ffmpeg.exe (conda-forge puts it there)
 _env_root = os.path.dirname(sys.executable)
@@ -137,7 +138,7 @@ def _load_models():
 
     t0 = time.time()
     from whisperx.diarize import DiarizationPipeline
-    _diarize_model = DiarizationPipeline(token=hf_token or None, device=DEVICE)
+    _diarize_model = DiarizationPipeline(model_name=DIARIZE_MODEL_PATH, token=hf_token or None, device=DEVICE)
     logger.info("Diarize model loaded in %.1fs", time.time() - t0)
 
     t0 = time.time()
