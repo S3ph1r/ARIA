@@ -6,7 +6,7 @@ Wraps WhisperX large-v3 + align (it) + pyannote speaker-diarization-community-1
 Output contract matches qwen3-asr-1.7b so Stage C is model-agnostic.
 
 Blackwell fixes:
-  - compute_type="float16"  (cuBLAS int8 → NOT_SUPPORTED on sm_120)
+  - compute_type="float16"  (cuBLAS int8 -> NOT_SUPPORTED on sm_120)
   - arch spoof pre-pyannote  (NVRTC Jiterator fails on complex FFT at sm_120)
 """
 
@@ -14,8 +14,21 @@ import os
 import sys
 import logging
 
-os.environ.pop("HF_HUB_OFFLINE", None)  # orchestrator injects this; clear it so hf_hub can resolve local cache
+# ── Path convention: mirrors flux_imagegen backend ──────────────────────────
+ARIA_ROOT  = os.environ.get("ARIA_ROOT", r"C:\Users\Roberto\aria")
+MODELS_DIR = os.path.join(ARIA_ROOT, "data", "assets", "models")
+
+# Redirect all HF downloads to aria/data (alignment model, pyannote diarize)
+os.environ["HF_HOME"] = MODELS_DIR
+# orchestrator injects HF_HUB_OFFLINE=1; pop it so hf_hub can reach HF when a
+# model is not yet cached in aria/data (e.g. alignment model on first start)
+os.environ.pop("HF_HUB_OFFLINE", None)
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
+# Local model paths
+WHISPER_MODEL_PATH = os.path.join(MODELS_DIR, "faster-whisper-large-v3")
+WESPEAKER_PATH     = os.path.join(MODELS_DIR, "pyannote", "wespeaker-voxceleb-resnet34-LM")
+ALIGN_CACHE_DIR    = os.path.join(MODELS_DIR, "whisperx-align")
 
 # Add conda Library/bin to PATH so whisperx finds ffmpeg.exe (conda-forge puts it there)
 _env_root = os.path.dirname(sys.executable)
@@ -111,13 +124,15 @@ _voiceprint_encoder = None   # pyannote wespeaker-resnet34-LM
 def _load_models():
     global _model, _align_model, _align_meta, _diarize_model, _voiceprint_encoder
 
-    logger.info("Loading WhisperX %s on %s (%s)...", MODEL_SIZE, DEVICE, COMPUTE_TYPE)
+    logger.info("Loading WhisperX %s on %s (%s) from %s ...", MODEL_SIZE, DEVICE, COMPUTE_TYPE, WHISPER_MODEL_PATH)
     t0 = time.time()
-    _model = whisperx.load_model(MODEL_SIZE, DEVICE, compute_type=COMPUTE_TYPE)
+    _model = whisperx.load_model(WHISPER_MODEL_PATH, DEVICE, compute_type=COMPUTE_TYPE)
     logger.info("ASR model loaded in %.1fs", time.time() - t0)
 
     t0 = time.time()
-    _align_model, _align_meta = whisperx.load_align_model(language_code=LANGUAGE, device=DEVICE)
+    _align_model, _align_meta = whisperx.load_align_model(
+        language_code=LANGUAGE, device=DEVICE, model_dir=ALIGN_CACHE_DIR
+    )
     logger.info("Align model loaded in %.1fs", time.time() - t0)
 
     t0 = time.time()
@@ -127,11 +142,11 @@ def _load_models():
 
     t0 = time.time()
     try:
-        emb_model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM")
+        emb_model = Model.from_pretrained(WESPEAKER_PATH)
         _voiceprint_encoder = Inference(emb_model, window="whole", device=torch.device(DEVICE))
         logger.info("Voiceprint encoder loaded in %.1fs", time.time() - t0)
     except Exception as e:
-        logger.warning("Voiceprint encoder unavailable: %s — voiceprints will be empty", e)
+        logger.warning("Voiceprint encoder unavailable: %s -- voiceprints will be empty", e)
         _voiceprint_encoder = None
 
 
@@ -278,7 +293,7 @@ def transcribe(req: TranscribeRequest):
     try:
         _download_file(req.wav_url, wav_path)
 
-        # Load as float32 mono 16kHz — bypasses ffmpeg for WAV files
+        # Load as float32 mono 16kHz -- bypasses ffmpeg for WAV files
         audio_np, sr = sf.read(wav_path, dtype="float32", always_2d=False)
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
@@ -289,7 +304,7 @@ def transcribe(req: TranscribeRequest):
         t_asr = time.perf_counter()
         wx_result = _model.transcribe(audio_np, batch_size=4, language=req.language)
         detected_lang = wx_result.get("language", req.language)
-        logger.info("ASR done in %.1fs — lang=%s", time.perf_counter() - t_asr, detected_lang)
+        logger.info("ASR done in %.1fs -- lang=%s", time.perf_counter() - t_asr, detected_lang)
 
         t_align = time.perf_counter()
         wx_result = whisperx.align(
@@ -305,7 +320,7 @@ def transcribe(req: TranscribeRequest):
 
         t_vp = time.perf_counter()
         output = _to_contract(wx_result, audio_np, detected_lang)
-        logger.info("Voiceprint done in %.1fs — %d speakers",
+        logger.info("Voiceprint done in %.1fs -- %d speakers",
                     time.perf_counter() - t_vp, len(output["voiceprints"]))
 
     except Exception as exc:
@@ -317,7 +332,7 @@ def transcribe(req: TranscribeRequest):
 
     elapsed = round(time.perf_counter() - t0, 2)
     logger.info(
-        "Done %s in %.1fs — %d chars, %d turns, %d voiceprints",
+        "Done %s in %.1fs -- %d chars, %d turns, %d voiceprints",
         req.segment_id, elapsed,
         len(output["transcript"]),
         len(output["speaker_turns"]),
