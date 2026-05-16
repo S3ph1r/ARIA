@@ -341,6 +341,11 @@ class BaseBackend(ABC):
 | `llm` | `gemini-flash-lite` | Cloud | Google Gateway | text |
 | `mus` | `acestep-1.5-xl-sft` | 8 GB | ACE-Step DiT XL (wrapper 8084) | WAV 44.1kHz stereo |
 | `mus` | `audiocraft-medium` | 4-6 GB | AudioGen / MusicGen (wrapper 8086) | WAV 44.1kHz stereo |
+| `stt` | `whisperx-large-v3` | 10 GB | WhisperX + pyannote + wespeaker (porta 8091) | JSON: transcript + speaker turns + voiceprint 256d |
+| `stt` | `qwen3-asr-1.7b` | 9 GB | Qwen3-ASR + ForcedAligner + pyannote (porta 8087, ⏸️ standby) | JSON: transcript + speaker turns + voiceprint 256d |
+| `llm` | `qwen3-14b-q4km` | 9 GB | llama-server.exe GGUF (porta 8090, Lifelog2) | JSON: MemoryAtom (summary, topics, entities, speaker_turns_annotated) |
+
+> **Critico per nuovi backend STT/LLM:** ogni nuovo `model_id` deve essere aggiunto alla lista `model_logic_ids` nel metodo `_run_loop()` di `orchestrator.py`. ARIA scansiona Redis solo per i model IDs in questa lista — se manca, la coda è invisibile e i task restano bloccati indefinitamente. Non è auto-discovery, è un registro hardcoded.
 
 ### Nota su VRAM e coesistenza
 

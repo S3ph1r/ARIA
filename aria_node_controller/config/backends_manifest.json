@@ -175,7 +175,7 @@
     "qwen3-asr-1.7b": {
       "metadata": {
         "display_name": "Lifelog ASR (Qwen3-ASR-1.7B)",
-        "description": "Backend STT per Lifelog2. Trascrizione multilingue (52 lingue) con ForcedAligner-0.6B (word timestamps) e pyannote community-1 (diarizzazione speaker).",
+        "description": "Backend STT per Lifelog2. Trascrizione multilingue (52 lingue) con ForcedAligner-0.6B (word timestamps) e pyannote community-1 (diarizzazione speaker). [STANDBY — sostituito da whisperx-large-v3]",
         "capabilities": [
           "stt",
           "diarization",
@@ -192,12 +192,13 @@
     "whisperx-large-v3": {
       "metadata": {
         "display_name": "WhisperX large-v3",
-        "description": "Backend trascrizione+diarizzazione per Lifelog2. WhisperX large-v3 (float16, Blackwell-safe) + align ITA + pyannote community-1.",
+        "description": "Backend STT primario per Lifelog2. WhisperX large-v3 (float16, Blackwell-safe) + wav2vec2 align ITA + pyannote community-1 diarization + wespeaker-resnet34-LM voiceprint 256d.",
         "capabilities": [
           "stt",
           "diarization",
           "word-timestamps",
           "speaker-labels",
+          "voiceprint",
           "italian"
         ]
       },

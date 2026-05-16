@@ -91,6 +91,24 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 **Descrizione:** I file WAV generati da Qwen3/Fish rimanevano in `data/outputs/` su PC 139 a tempo indeterminato dopo che Stage D li aveva già copiati su CT201. Spreco di spazio crescente su run lunghi.  
 **Fix applicato:** `orchestrator.py` — aggiunto `do_DELETE` in `AriaAssetHandler`. Stage D — aggiunto `_delete_remote_asset()` chiamato dopo ogni download confermato. Commit `a891485` (ARIA) + `642b659` (DIAS).
 
+### A0-4 — WhisperX come backend ASR primario + fix orchestratore (model_logic_ids + RLock)
+**Stato:** resolved
+**Risolto:** 2026-05-14
+**Descrizione:** Tre problemi connessi emersi durante l'integrazione WhisperX large-v3 come ASR primario di Lifelog2:
+1. `whisperx-large-v3` mancante da `model_logic_ids` in `orchestrator.py` (_run_loop): ARIA non scansionava la coda Redis del modello → task in coda indefiniti.
+2. `backends/lifelog_whisperx.py` (handler class `LifelogWhisperXBackend`) mancante su PC139 → `_BACKENDS_AVAILABLE = False` → TUTTI i backend Python diventavano None, incluso `_asr_backend`.
+3. Shutdown deadlock: `_ensure_single()` teneva `threading.Lock` e chiamava `_kill_proc()` che acquisiva lo stesso Lock → deadlock. Fix: `self._lock = threading.RLock()`.
+**Soluzione adottata:**
+- `orchestrator.py` riga 668: `"whisperx-large-v3"` aggiunto a `model_logic_ids`.
+- `backends/lifelog_whisperx.py` deployato su PC139 (`LifelogWhisperXBackend`, `estimated_vram_gb()=12.0`).
+- `threading.RLock()` sostituisce `Lock()` a riga 171.
+- `backends_manifest.json`: entry `whisperx-large-v3` (porta 8091, env `lifelog-whisperx`, `startup_wait=150`).
+- Stage C `stage_c_asr.py` su CT203: coda aggiornata a `aria:q:stt:local:whisperx-large-v3:lifelog`.
+**E2E validato:** pipeline A→E in ~91s su segmento 299s audio (3.3× realtime warm). Qwen3-ASR-1.7B (8087) in standby.
+**Nota architecturale:** ogni nuovo modello/backend DEVE essere aggiunto a `model_logic_ids` in `_run_loop()` — altrimenti ARIA è cieca alla coda. È un registro hardcoded, non auto-discovery.
+
+---
+
 ### A0-1 — `dashboard/server.py` non tracciato su git
 **Stato:** resolved  
 **Risolto:** 2026-05-03  

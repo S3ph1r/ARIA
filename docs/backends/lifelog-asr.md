@@ -1,9 +1,9 @@
 # Lifelog ASR — Backend STT per ARIA
 
-> **Aggiornato**: 2026-05-07
+> **Aggiornato**: 2026-05-11
 > **Ambiente**: `%ARIA_ROOT%\envs\lifelog-asr` (Python 3.12)
 > **Porta**: 8087
-> **Stato**: 🔧 In setup (env creato, install in corso)
+> **Stato**: ✅ Operativo (Blackwell Stable)
 > **Client principale**: Lifelog2 (CT190 via Redis)
 
 ---
@@ -51,7 +51,14 @@ WAV input (16kHz mono, ~5 min)
 └─────────────┬────────────────────┘
               │
               ▼
-         merge: testo + speaker + timestamps
+┌──────────────────────────────────┐
+│  Pyannote Embedding (ResNet34)   │  ← estrazione voiceprint pooling
+│  (wespeaker-voxceleb)            │    output: vettore 256d
+│  ~1.5 GB VRAM                    │
+└─────────────┬────────────────────┘
+              │
+              ▼
+         merge: testo + speaker + embedding
               │
               ▼
          SpeakerTurns strutturate → JSON output
@@ -85,6 +92,9 @@ La scelta di Qwen3-ASR al posto di WhisperX è basata su benchmark italiani docu
 | Manutenzione | Attiva (Alibaba Qwen, 2025-2026) | Ridotta — fork BetterWhisperX attivo |
 | sm_120 (Blackwell) | ✅ PyTorch 2.11+cu128, confermato | ✅ PyTorch 2.8+cu128, confermato V1 |
 | Lingue certificate IT | ✅ benchmark pubblici | ⚠️ nessun benchmark IT ufficiale |
+
+### Stabilità Blackwell (Fix 2026-05-11)
+A causa di un bug noto nella libreria `libtorchcodec` su Windows 11 con architettura Blackwell, il caricamento audio via `torchaudio.load()` causa crash intermittenti. Il backend è stato patchato per usare **`soundfile.read()`**, garantendo stabilità totale.
 
 ### Limitazione nota
 
@@ -212,10 +222,7 @@ POST /transcribe
 | PyTorch | 2.11.0+cu128 | sm_120 (Blackwell) confermato |
 | `qwen-asr` | latest | porta `transformers==4.57.6` come dipendenza |
 | `transformers` | **4.57.6** | ⚠️ NON aggiornare a 5.x |
-| `pyannote.audio` | **4.0.1** | ⚠️ NON 4.0.2+ (pinna torch==2.8.0) |
-| `pyannote/speaker-diarization-community-1` | community-1 | modello gated su HF (accettato) |
-| `pyannote/segmentation-3.0` | — | dipendenza gated (accettata) |
-| `flash-attn` | ❌ skip | compilazione problematica su sm_120 |
+| `pyannote.audio` | **4.0.1** | Gestisce diarizzazione ed embedding (wespeaker) |
 
 ### Comandi setup (da eseguire su PC139)
 
@@ -234,9 +241,8 @@ C:\Users\Roberto\aria\envs\lifelog-asr\python.exe -m pip install -U qwen-asr
 C:\Users\Roberto\aria\envs\lifelog-asr\python.exe -m pip install ^
     "pyannote.audio==4.0.1"
 
-:: HF token per download modelli gated (pyannote community-1)
-C:\Users\Roberto\aria\envs\lifelog-asr\python.exe -c ^
-    "from huggingface_hub import login; login(token='<HF_TOKEN>')"
+:: HF login globale (gestito ora in server.py all'avvio)
+:: Assicurarsi che HF_HUB_OFFLINE=0 sia settato.
 ```
 
 ---

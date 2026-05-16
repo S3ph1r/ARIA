@@ -28,8 +28,9 @@ Aggiornato ad ogni modifica architetturale significativa.
 | ACE-Step 1.5 XL SFT | 8084 | `envs/dias-sound-engine` | `backends/acestep/aria_wrapper_server.py` | ✅ Operativo | ~8 GB |
 | Qwen3.5 35B MoE | 8085 | `envs/nh-qwen35-llm` | `backends/llm/server.py` | ✅ Operativo | ~13-14 GB |
 | Audiocraft (AudioGen+MusicGen) | 8086 | `envs/dias-sound-engine` | `backends/audiocraft/aria_audiocraft_server.py` | ✅ Operativo | ~4-6 GB |
-| Lifelog ASR (Qwen3-ASR-1.7B) | 8087 | `envs/lifelog-asr` | `backends/lifelog_asr/server.py` | ✅ Operativo | ~9 GB |
+| Lifelog ASR (Qwen3-ASR-1.7B) | 8087 | `envs/lifelog-asr` | `backends/lifelog_asr/server.py` | ⏸️ Standby (sostituito da WhisperX) | ~9 GB |
 | Lifelog LLM (qwen3-14b-q4km) | 8090 | `envs/lifelog-llm` | `llama-server.exe` b9119 (CUDA 13.1 sm_120) | ✅ Operativo | ~9 GB |
+| Lifelog WhisperX large-v3 | 8091 | `envs/lifelog-whisperx` | `backends/lifelog_whisperx/server.py` | ✅ Operativo (2026-05-14) | ~10 GB |
 
 > I backend su porta 8084 e 8086 condividono lo stesso ambiente `dias-sound-engine` ma sono processi distinti avviati in momenti diversi — mai in contemporanea per gestione VRAM.
 
@@ -47,7 +48,8 @@ Tutte le code seguono il pattern: `aria:q:{type}:local:{model_id}:{client_id}`
 | `aria:q:tts:local:fish-s1-mini:dias` | Fish S1-mini (8080) | TTS con emotion tagging | DIAS |
 | `aria:q:llm:local:qwen3.5-35b-moe-q3ks:dias` | Qwen3.5 35B (8085) | LLM ragionamento | DIAS |
 | `aria:q:mus:local:acestep-1.5-xl-sft:dias` | Orchestratore | Musica/Suono (PAD, AMB, SFX, STING, Leitmotif) | DIAS |
-| `aria:q:stt:local:qwen3-asr-1.7b:lifelog` | Lifelog ASR (8087) | Trascrizione audio + diarizzazione | Lifelog2 |
+| `aria:q:stt:local:whisperx-large-v3:lifelog` | Lifelog WhisperX (8091) | Trascrizione + diarizzazione + voiceprint 256d | Lifelog2 |
+| `aria:q:stt:local:qwen3-asr-1.7b:lifelog` | Lifelog ASR (8087) | ⏸️ Standby — sostituito da whisperx-large-v3 | Lifelog2 |
 | `aria:q:llm:local:qwen3-14b-q4km:lifelog` | Lifelog LLM (8090) | LLM enrichment — MemoryAtom extraction | Lifelog2 |
 | `aria:q:cloud:*` | CloudManager | Gemini API (fallback) | vari |
 
@@ -68,7 +70,8 @@ Tutte le code seguono il pattern: `aria:q:{type}:local:{model_id}:{client_id}`
 | `aria-cloud` | 3.12 | — | Google GenAI SDK (Gemini) | ✅ Operativo |
 | `sox` | — | — | SoX audio processing tool | ✅ Operativo |
 | `audiocraft-env` | 3.11 | 2.11.0+cu128 | — | ⛔ Deprecato (sostituito da `dias-sound-engine`) |
-| `lifelog-asr` | 3.12 | 2.11.0+cu128 | Qwen3-ASR-1.7B, ForcedAligner-0.6B, pyannote.audio 4.0.1 | 🔧 In setup (2026-05-07) |
+| `lifelog-asr` | 3.12 | 2.11.0+cu128 | Qwen3-ASR-1.7B, ForcedAligner-0.6B, pyannote.audio 4.0.1 | ⏸️ Standby |
+| `lifelog-whisperx` | 3.12 | 2.8.0+cu128 | WhisperX large-v3 (float16), pyannote community-1, wespeaker-resnet34-LM | ✅ Operativo (2026-05-14) |
 
 ---
 
@@ -96,7 +99,8 @@ http://localhost:8083/health       → Qwen3-TTS
 http://localhost:8084/health       → ACE-Step wrapper
 http://localhost:8085/v1/health    → Qwen3.5 35B LLM
 http://localhost:8086/health       → Audiocraft (AudioGen + MusicGen)
-http://localhost:8087/health       → Lifelog ASR (Qwen3-ASR-1.7B + ForcedAligner + pyannote)
+http://localhost:8087/health       → Lifelog ASR (Qwen3-ASR-1.7B + ForcedAligner + pyannote) [standby]
+http://localhost:8091/health       → Lifelog WhisperX (large-v3 + align + pyannote + wespeaker)
 ```
 
 ---
@@ -129,4 +133,5 @@ Tutti i pesi risiedono in `ARIA_ROOT/data/assets/models/` (git-ignored).
 - [DIAS ↔ ARIA Sound Integration](DIAS-ARIA-ACEStep-Integration.md) — Protocollo produzione audio
 - [Audiocraft Backend](backends/audiocraft-backend.md) — Dettagli AudioGen/MusicGen
 - [ACE-Step Payload Strategy](backends/acestep-payload-strategy.md) — Payload per PAD/Leitmotif
-- [Lifelog ASR Backend](backends/lifelog-asr.md) — Qwen3-ASR-1.7B + ForcedAligner + pyannote, integrazione Lifelog2
+- [Lifelog ASR Backend](backends/lifelog-asr.md) — Qwen3-ASR-1.7B + ForcedAligner + pyannote [standby]
+- [Lifelog WhisperX Backend](backends/lifelog-whisperx.md) — WhisperX large-v3 + voiceprint 256d, backend primario Lifelog2
