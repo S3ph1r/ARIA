@@ -73,6 +73,7 @@ try:
     from backends.audiocraft import AudiocraftBackend
     from backends.lifelog_asr import LifelogASRBackend
     from backends.lifelog_whisperx import LifelogWhisperXBackend
+    from backends.flux_imagegen import FluxImageGenBackend
     _BACKENDS_AVAILABLE = True
     HAS_ACESTEP = True
     HAS_AUDIOCRAFT = True
@@ -85,6 +86,7 @@ except ImportError:
         from ..backends.audiocraft import AudiocraftBackend
         from ..backends.lifelog_asr import LifelogASRBackend
         from ..backends.lifelog_whisperx import LifelogWhisperXBackend
+        from ..backends.flux_imagegen import FluxImageGenBackend
         _BACKENDS_AVAILABLE = True
         HAS_ACESTEP = True
         HAS_AUDIOCRAFT = True
@@ -93,6 +95,7 @@ except ImportError:
         HAS_ACESTEP = False
         HAS_AUDIOCRAFT = False
         LifelogLLMBackend = None
+        FluxImageGenBackend = None
 
 
 logger = get_logger("node.orchestrator")
@@ -516,6 +519,7 @@ class NodeOrchestrator:
         self._audiocraft_backend = AudiocraftBackend() if HAS_AUDIOCRAFT else None
         self._asr_backend        = LifelogASRBackend() if _BACKENDS_AVAILABLE else None
         self._whisperx_backend   = LifelogWhisperXBackend() if _BACKENDS_AVAILABLE else None
+        self._flux_backend       = FluxImageGenBackend() if _BACKENDS_AVAILABLE and FluxImageGenBackend else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
@@ -814,6 +818,8 @@ class NodeOrchestrator:
             self._process_llm_task(task, start_t)
         elif task.model_id == "qwen3-14b-q4km":
             self._process_lifelog_llm_task(task, start_t)
+        elif task.model_id == "flux2-klein-4b" or task.model_type == "imagegen":
+            self._process_flux_task(task, start_t)
         elif task.model_id in ("qwen3-asr-1.7b", "whisperx-large-v3") or task.model_type == "stt":
             self._process_asr_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
@@ -1129,6 +1135,45 @@ class NodeOrchestrator:
             self.qm.post_result(task, result)
         except Exception as e:
             logger.error("Lifelog LLM task failed: %s", e, exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="error",
+                processing_time_seconds=time.time() - start_t,
+                error=str(e),
+            )
+            self.qm.post_result(task, result)
+
+    def _process_flux_task(self, task, start_t: float):
+        """Dispatch di un task image generation verso FluxImageGenBackend (FLUX.2-klein-4B, porta 8092)."""
+        if not self._flux_backend:
+            raise RuntimeError("FluxImageGenBackend non disponibile.")
+
+        if not self.process_manager.ensure_running(task.model_id):
+            raise RuntimeError(f"Impossibile avviare il backend FLUX per {task.model_id}")
+
+        try:
+            result_data = self._flux_backend.run(
+                payload=task.payload,
+                aria_root=ARIA_ROOT,
+                local_ip=self.local_ip,
+            )
+            duration_s = time.time() - start_t
+
+            result = AriaTaskResult(
+                job_id=task.job_id,
+                client_id=task.client_id,
+                model_type=task.model_type,
+                model_id=task.model_id,
+                status="done",
+                processing_time_seconds=duration_s,
+                output=result_data,
+            )
+            self.qm.post_result(task, result)
+        except Exception as e:
+            logger.error("FLUX task failed: %s", e, exc_info=True)
             result = AriaTaskResult(
                 job_id=task.job_id,
                 client_id=task.client_id,
