@@ -778,8 +778,9 @@ class NodeOrchestrator:
         start_t = time.time()
 
         # --- Idempotency Check (SOA v2.1) ---
-        # Determiniamo il nome file atteso per questo task
-        if task.model_id == "fish-s1-mini":
+        if task.model_type == "imagegen" or task.model_id == "flux2-klein-4b":
+            filename = f"{task.job_id}.jpeg"
+        elif task.model_id == "fish-s1-mini":
             filename = f"{task.job_id}_scene-001.wav"
         else:
             filename = f"{task.job_id}.wav"
@@ -788,9 +789,21 @@ class NodeOrchestrator:
 
         if local_out_path.exists():
             logger.info(f"Idempotenza ARIA: File {filename} già presente. Salto inferenza.")
-            duration_s = self._get_wav_duration(local_out_path)
-            # Nota: Uniformiamo il porto del server asset (8082) per ogni tipo di output
             public_url = f"http://{self.local_ip}:{HTTP_PORT}/{filename}"
+
+            if task.model_type == "imagegen" or task.model_id == "flux2-klein-4b":
+                output_payload = {
+                    "image_url":  public_url,
+                    "local_path": str(local_out_path),
+                    "cached":     True,
+                }
+            else:
+                duration_s = self._get_wav_duration(local_out_path)
+                output_payload = {
+                    "audio_url":        public_url,
+                    "duration_seconds": duration_s,
+                    "cached":           True,
+                }
 
             result = AriaTaskResult(
                 job_id=task.job_id,
@@ -799,11 +812,7 @@ class NodeOrchestrator:
                 model_id=task.model_id,
                 status="done",
                 processing_time_seconds=time.time() - start_t,
-                output={
-                    "audio_url": public_url,
-                    "duration_seconds": duration_s,
-                    "cached": True
-                }
+                output=output_payload,
             )
             self.qm.post_result(task, result)
             return

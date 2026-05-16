@@ -3,6 +3,8 @@ ARIA — FLUX.2-klein-4B Image Generation Backend Client
 
 HTTP adapter that calls the local FastAPI server on port 8092.
 Used by the orchestrator to dispatch image generation tasks from Lifelog2.
+
+Output: JPEG saved locally by the server, served via asset server (port 8082).
 """
 
 import logging
@@ -30,27 +32,40 @@ class FluxImageGenBackend:
         if not prompt:
             raise ValueError("Campo 'prompt' obbligatorio per image gen")
 
+        job_id          = payload.get("job_id", "output")
+        output_filename = f"{job_id}.jpeg"
+
         request_body = {
-            "prompt":     prompt,
-            "width":      payload.get("width",    512),
-            "height":     payload.get("height",   512),
-            "steps":      payload.get("steps",    20),
-            "guidance":   payload.get("guidance", 3.5),
-            "seed":       payload.get("seed",     -1),
-            "output_key": payload.get("output_key"),
+            "prompt":          prompt,
+            "output_filename": output_filename,
+            "width":           payload.get("width",    512),
+            "height":          payload.get("height",   512),
+            "steps":           payload.get("steps",    20),
+            "guidance":        payload.get("guidance", 3.5),
+            "seed":            payload.get("seed",     -1),
         }
 
-        timeout = payload.get("timeout_seconds", 120)
+        timeout = payload.get("timeout_seconds", 300)
         url = f"http://127.0.0.1:{FLUX_PORT}/generate"
 
-        logger.info("FluxImageGen request — prompt='%.60s...' size=%dx%d",
-                    prompt, request_body["width"], request_body["height"])
+        logger.info(
+            "FluxImageGen request — prompt='%.60s...' size=%dx%d out=%s",
+            prompt, request_body["width"], request_body["height"], output_filename,
+        )
 
         try:
             resp = requests.post(url, json=request_body, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
-            return data.get("output", {})
         except Exception as e:
             logger.error("FluxImageGen call failed: %s", e)
             raise RuntimeError(f"FluxImageGen call failed: {e}")
+
+        # Asset server (port 8082) serves files from ARIA_OUTPUT_DIR
+        image_url = f"http://{local_ip}:8082/{output_filename}"
+
+        return {
+            "image_url":              image_url,
+            "local_path":             data.get("output_path"),
+            "processing_time_seconds": data.get("processing_time"),
+        }
