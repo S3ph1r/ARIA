@@ -144,7 +144,7 @@
       "script": "backends/acestep/aria_wrapper_server.py",
       "args": [
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         "8084"
       ]
@@ -167,7 +167,7 @@
       "script": "backends/audiocraft/aria_audiocraft_server.py",
       "args": [
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         "8086"
       ]
