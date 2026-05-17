@@ -97,7 +97,7 @@
       },
       "port": 8090,
       "health_url": "http://localhost:8090/health",
-      "startup_wait": 120,
+      "startup_wait": 600,
       "env_prefix": "envs/lifelog-llm",
       "script": "backends/lifelog_llm/launcher.py",
       "args": [

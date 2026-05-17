@@ -2,11 +2,11 @@
 ARIA FLUX.2-klein-4B Image Generation Server — FastAPI on port 8092
 
 Architecture:
-  - Flux2KleinPipeline (diffusers ≥0.37.0.dev0)
+  - Flux2KleinPipeline (diffusers ≥0.39.0.dev0)
   - Text encoder: Qwen3-4B loaded BF16, quantized INT8 via optimum-quanto (~3.75 GB VRAM)
   - Transformer: BF16 (~6.5 GB VRAM)
   - VAE: BF16 (~0.5 GB VRAM)
-  - Total: ~11 GB VRAM, 5 GB headroom on RTX 5060 Ti 16 GB
+  - Total: ~12.8 GB VRAM, ~3.2 GB headroom on RTX 5060 Ti 16 GB
 
 Blackwell SM_120 notes:
   - No Flash Attention (lacks TMA/UTMA), no xformers
@@ -14,16 +14,16 @@ Blackwell SM_120 notes:
   - PyTorch 2.7.0 cu128 first stable SM_120 support
 
 JIT pattern: loaded on startup (lifespan), unloaded on shutdown.
-Output: PNG saved to MinIO warehouse.
+Output: JPEG saved to ARIA_OUTPUT_DIR, served via asset server (port 8082).
 """
 
 import os
-import sys
 import gc
 import io
 import time
 import logging
 import random
+from pathlib import Path
 
 import torch
 
@@ -43,31 +43,18 @@ logger = logging.getLogger(__name__)
 
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from minio import Minio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 import uvicorn
 
 load_dotenv()
 
-DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE        = torch.bfloat16
+DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE    = torch.bfloat16
 
-ARIA_ROOT    = os.environ.get("ARIA_ROOT", r"C:\Users\Roberto\ARIA")
-MODEL_PATH   = os.path.join(ARIA_ROOT, "data", "assets", "models", "flux2-klein-4b")
-
-MINIO_ENDPOINT   = os.getenv("ARIA_MINIO_ENDPOINT",   "192.168.1.104:9000")
-MINIO_ACCESS_KEY = os.getenv("ARIA_MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("ARIA_MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET     = os.getenv("ARIA_MINIO_BUCKET",     "aria-warehouse")
-
-minio_client = Minio(
-    MINIO_ENDPOINT,
-    access_key=MINIO_ACCESS_KEY,
-    secret_key=MINIO_SECRET_KEY,
-    secure=False,
-)
+ARIA_ROOT      = Path(os.environ.get("ARIA_ROOT", r"C:\Users\Roberto\ARIA"))
+MODEL_PATH     = ARIA_ROOT / "data" / "assets" / "models" / "flux2-klein-4b"
+ARIA_OUTPUT_DIR = ARIA_ROOT / "data" / "outputs"
 
 _pipe = None
 
@@ -80,23 +67,21 @@ def _load_models():
     logger.info("Loading Flux2KleinPipeline from %s ...", MODEL_PATH)
     t0 = time.time()
 
-    # Load full pipeline to CPU in BF16 — text encoder stays on CPU until quantized
     _pipe = Flux2KleinPipeline.from_pretrained(
-        MODEL_PATH,
+        str(MODEL_PATH),
         torch_dtype=DTYPE,
         local_files_only=True,
     )
     logger.info("Pipeline loaded from disk in %.1fs", time.time() - t0)
 
-    # INT8 quantize text encoder (Qwen3-4B) while still on CPU:
-    # 7.50 GB BF16 → 3.75 GB INT8, reduces peak VRAM by ~3.75 GB
+    # INT8 quantize text encoder (Qwen3-4B) on CPU before moving to GPU:
+    # 7.50 GB BF16 → 3.75 GB INT8
     logger.info("Quantizing text encoder (Qwen3-4B) INT8 via optimum-quanto ...")
     t1 = time.time()
     quantize(_pipe.text_encoder, weights=qint8)
     freeze(_pipe.text_encoder)
     logger.info("Text encoder quantized in %.1fs", time.time() - t1)
 
-    # Move entire pipeline to GPU — text encoder already INT8 (~3.75 GB)
     _pipe.to(DEVICE)
 
     vram = round(torch.cuda.memory_allocated() / 1e9, 1) if torch.cuda.is_available() else 0
@@ -120,7 +105,7 @@ async def lifespan(app: FastAPI):
     _unload_models()
 
 
-app = FastAPI(title="ARIA FLUX.2-klein ImageGen", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ARIA FLUX.2-klein ImageGen", version="1.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -136,13 +121,13 @@ def health():
 
 
 class GenerateRequest(BaseModel):
-    prompt:     str
-    width:      int = 512
-    height:     int = 512
-    steps:      int = 20
-    guidance:   float = 3.5
-    seed:       int = -1           # -1 = random
-    output_key: Optional[str] = None   # MinIO object key; if None returns no URL
+    prompt:          str
+    output_filename: str = "output.jpeg"
+    width:           int = 512
+    height:          int = 512
+    steps:           int = 20
+    guidance:        float = 3.5
+    seed:            int = -1
 
 
 @app.post("/generate")
@@ -150,13 +135,16 @@ def generate(req: GenerateRequest):
     if _pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not loaded")
 
+    ARIA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = ARIA_OUTPUT_DIR / req.output_filename
+
     t0 = time.perf_counter()
     seed = req.seed if req.seed >= 0 else random.randint(0, 2**32 - 1)
     generator = torch.Generator(device=DEVICE).manual_seed(seed)
 
     logger.info(
-        "generate — seed=%d steps=%d size=%dx%d prompt='%.80s'",
-        seed, req.steps, req.width, req.height, req.prompt,
+        "generate — seed=%d steps=%d size=%dx%d out=%s prompt='%.80s'",
+        seed, req.steps, req.width, req.height, req.output_filename, req.prompt,
     )
 
     try:
@@ -173,47 +161,28 @@ def generate(req: GenerateRequest):
         logger.error("Generation failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
+    image.save(str(out_path), format="JPEG", quality=90)
     elapsed = round(time.perf_counter() - t0, 2)
-    logger.info("Generated in %.1fs", elapsed)
-
-    # Encode to PNG in memory
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    buf.seek(0)
-    png_bytes = buf.getvalue()
-
-    minio_url = None
-    if req.output_key:
-        try:
-            _ensure_bucket()
-            minio_client.put_object(
-                MINIO_BUCKET,
-                req.output_key,
-                io.BytesIO(png_bytes),
-                length=len(png_bytes),
-                content_type="image/png",
-            )
-            minio_url = f"http://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{req.output_key}"
-            logger.info("Saved to MinIO: %s", minio_url)
-        except Exception as exc:
-            logger.warning("MinIO upload failed: %s", exc)
+    logger.info("Generated in %.1fs → %s", elapsed, out_path)
 
     return {
-        "status": "done",
+        "output_path":     str(out_path),
+        "output_filename": req.output_filename,
         "processing_time": elapsed,
-        "output": {
-            "seed":      seed,
-            "width":     req.width,
-            "height":    req.height,
-            "steps":     req.steps,
-            "minio_url": minio_url,
-        },
+        "seed":            seed,
+        "width":           req.width,
+        "height":          req.height,
     }
 
 
-def _ensure_bucket():
-    if not minio_client.bucket_exists(MINIO_BUCKET):
-        minio_client.make_bucket(MINIO_BUCKET)
+@app.delete("/output/{filename}")
+def delete_output(filename: str):
+    out_path = ARIA_OUTPUT_DIR / filename
+    if out_path.exists():
+        out_path.unlink()
+        logger.info("Deleted output: %s", out_path)
+        return {"deleted": str(out_path)}
+    return {"deleted": None}
 
 
 if __name__ == "__main__":

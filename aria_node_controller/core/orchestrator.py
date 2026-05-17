@@ -175,6 +175,7 @@ class ModelProcessManager:
 
         # Caricamento Manifest dei Backend
         self.MODEL_CONFIGS = self._load_manifest()
+        self.local_ip = get_node_ip()
 
     def _load_manifest(self) -> dict:
         manifest_path = self.aria_root / "aria_node_controller" / "config" / "backends_manifest.json"
@@ -228,7 +229,7 @@ class ModelProcessManager:
         return cmd
 
     def _health_check(self, model_id: str) -> bool:
-        url = self.MODEL_CONFIGS[model_id]["health_url"]
+        url = self.MODEL_CONFIGS[model_id]["health_url"].replace("localhost", self.local_ip)
         try:
             r = requests.get(url, timeout=2)
             return r.status_code == 200
@@ -778,8 +779,9 @@ class NodeOrchestrator:
         start_t = time.time()
 
         # --- Idempotency Check (SOA v2.1) ---
-        # Determiniamo il nome file atteso per questo task
-        if task.model_id == "fish-s1-mini":
+        if task.model_type == "imagegen" or task.model_id == "flux2-klein-4b":
+            filename = f"{task.job_id}.jpeg"
+        elif task.model_id == "fish-s1-mini":
             filename = f"{task.job_id}_scene-001.wav"
         else:
             filename = f"{task.job_id}.wav"
@@ -788,9 +790,21 @@ class NodeOrchestrator:
 
         if local_out_path.exists():
             logger.info(f"Idempotenza ARIA: File {filename} già presente. Salto inferenza.")
-            duration_s = self._get_wav_duration(local_out_path)
-            # Nota: Uniformiamo il porto del server asset (8082) per ogni tipo di output
             public_url = f"http://{self.local_ip}:{HTTP_PORT}/{filename}"
+
+            if task.model_type == "imagegen" or task.model_id == "flux2-klein-4b":
+                output_payload = {
+                    "image_url":  public_url,
+                    "local_path": str(local_out_path),
+                    "cached":     True,
+                }
+            else:
+                duration_s = self._get_wav_duration(local_out_path)
+                output_payload = {
+                    "audio_url":        public_url,
+                    "duration_seconds": duration_s,
+                    "cached":           True,
+                }
 
             result = AriaTaskResult(
                 job_id=task.job_id,
@@ -799,11 +813,7 @@ class NodeOrchestrator:
                 model_id=task.model_id,
                 status="done",
                 processing_time_seconds=time.time() - start_t,
-                output={
-                    "audio_url": public_url,
-                    "duration_seconds": duration_s,
-                    "cached": True
-                }
+                output=output_payload,
             )
             self.qm.post_result(task, result)
             return
