@@ -1,9 +1,13 @@
 """
 Lifelog WhisperX Server — FastAPI on port 8091
 Wraps WhisperX large-v3 + align (it) + pyannote speaker-diarization-community-1
-+ pyannote wespeaker-resnet34-LM (voiceprint 256d).
++ WeSpeaker ResNet293 (voiceprint 256d, better cross-condition invariance than ResNet34).
 
 Output contract matches qwen3-asr-1.7b so Stage C is model-agnostic.
+
+Voiceprint loading:
+  - If ARIA_WESPEAKER_PATH env var points to a dir with avg_model.pt: loads from local disk
+  - Otherwise: downloads Wespeaker/wespeaker-voxceleb-resnet293-LM from HuggingFace
 
 Blackwell fixes:
   - compute_type="float16"  (cuBLAS int8 -> NOT_SUPPORTED on sm_120)
@@ -74,7 +78,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from huggingface_hub import login
 from minio import Minio
-from pyannote.audio import Model, Inference
+from pyannote.audio.models.embedding.wespeaker import WeSpeakerResNet293
 
 load_dotenv()
 
@@ -108,6 +112,15 @@ MINIO_ENDPOINT   = os.getenv("ARIA_MINIO_ENDPOINT",   "192.168.1.104:9000")
 MINIO_ACCESS_KEY = os.getenv("ARIA_MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("ARIA_MINIO_SECRET_KEY", "minioadmin")
 
+# WeSpeaker ResNet293 — auto-detect ARIA_ROOT local path, else HF download
+WESPEAKER_HF_REPO = "Wespeaker/wespeaker-voxceleb-resnet293-LM"
+_aria_root        = os.environ.get("ARIA_ROOT", "")
+WESPEAKER_LOCAL   = os.getenv(
+    "ARIA_WESPEAKER_PATH",
+    os.path.join(_aria_root, "data", "assets", "models", "pyannote",
+                 "wespeaker-voxceleb-resnet293-LM") if _aria_root else "",
+)
+
 minio_client = Minio(
     MINIO_ENDPOINT,
     access_key=MINIO_ACCESS_KEY,
@@ -119,11 +132,41 @@ _model             = None
 _align_model       = None
 _align_meta        = None
 _diarize_model     = None
-_voiceprint_encoder = None   # pyannote wespeaker-resnet34-LM
+_voiceprint_model  = None   # WeSpeakerResNet293 (256d)
+
+
+def _load_wespeaker_resnet293(device: str):
+    """Load WeSpeakerResNet293 from local wespeaker checkpoint or HuggingFace.
+
+    Wespeaker saves weights as avg_model.pt with keys matching model.resnet.*
+    (no extra prefix). We load directly into the pyannote wrapper class.
+    """
+    ckpt_local = os.path.join(WESPEAKER_LOCAL, "avg_model.pt") if WESPEAKER_LOCAL else ""
+    if ckpt_local and os.path.exists(ckpt_local):
+        logger.info("Loading WeSpeakerResNet293 from local: %s", ckpt_local)
+        ckpt_path = ckpt_local
+    else:
+        from huggingface_hub import hf_hub_download
+        logger.info("Downloading WeSpeakerResNet293 from HF: %s", WESPEAKER_HF_REPO)
+        ckpt_path = hf_hub_download(WESPEAKER_HF_REPO, "avg_model.pt",
+                                    token=hf_token or None)
+
+    raw = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    ws_state = raw.get("model", raw) if isinstance(raw, dict) else raw
+
+    model = WeSpeakerResNet293()
+    missing, unexpected = model.resnet.load_state_dict(ws_state, strict=False)
+    if missing:
+        logger.warning("WeSpeakerResNet293: %d missing / %d unexpected keys",
+                       len(missing), len(unexpected))
+    model.eval()
+    model.to(torch.device(device))
+    logger.info("WeSpeakerResNet293 loaded — embed_dim=256, device=%s", device)
+    return model
 
 
 def _load_models():
-    global _model, _align_model, _align_meta, _diarize_model, _voiceprint_encoder
+    global _model, _align_model, _align_meta, _diarize_model, _voiceprint_model
 
     logger.info("Loading WhisperX %s on %s (%s) from %s ...", MODEL_SIZE, DEVICE, COMPUTE_TYPE, WHISPER_MODEL_PATH)
     t0 = time.time()
@@ -143,18 +186,17 @@ def _load_models():
 
     t0 = time.time()
     try:
-        emb_model = Model.from_pretrained(WESPEAKER_PATH)
-        _voiceprint_encoder = Inference(emb_model, window="whole", device=torch.device(DEVICE))
+        _voiceprint_model = _load_wespeaker_resnet293(DEVICE)
         logger.info("Voiceprint encoder loaded in %.1fs", time.time() - t0)
     except Exception as e:
         logger.warning("Voiceprint encoder unavailable: %s -- voiceprints will be empty", e)
-        _voiceprint_encoder = None
+        _voiceprint_model = None
 
 
 def _unload_models():
-    global _model, _align_model, _align_meta, _diarize_model, _voiceprint_encoder
-    del _model, _align_model, _align_meta, _diarize_model, _voiceprint_encoder
-    _model = _align_model = _align_meta = _diarize_model = _voiceprint_encoder = None
+    global _model, _align_model, _align_meta, _diarize_model, _voiceprint_model
+    del _model, _align_model, _align_meta, _diarize_model, _voiceprint_model
+    _model = _align_model = _align_meta = _diarize_model = _voiceprint_model = None
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -165,12 +207,13 @@ def _extract_voiceprints(
     waveform: torch.Tensor,   # (1, T) float32 at 16kHz
     speaker_turns: list[dict],
 ) -> dict[str, list[float]]:
-    """256d ResNet34 embedding per speaker, pooled over all their turns (max 30s)."""
-    if _voiceprint_encoder is None:
+    """256d ResNet293 embedding per speaker, pooled over all their turns (max 30s)."""
+    if _voiceprint_model is None:
         return {}
 
     sr = 16000
     max_samples = sr * 30
+    dev = next(_voiceprint_model.parameters()).device
 
     # Collect audio crops per speaker
     crops: dict[str, list[torch.Tensor]] = {}
@@ -184,11 +227,13 @@ def _extract_voiceprints(
 
     voiceprints: dict[str, list[float]] = {}
     for spk, tensors in crops.items():
-        concat = torch.cat(tensors, dim=1)[:, :max_samples]
+        # concat: (1, T_total), cap at 30s
+        concat = torch.cat(tensors, dim=1)[:, :max_samples].to(dev)
         try:
             with torch.no_grad():
-                emb = _voiceprint_encoder({"waveform": concat, "sample_rate": sr})
-            voiceprints[spk] = emb.tolist()
+                # WeSpeakerResNet293.forward expects (batch, channels, time)
+                emb = _voiceprint_model(concat.unsqueeze(0))  # (1, 256)
+            voiceprints[spk] = emb[0].cpu().tolist()
         except Exception as exc:
             logger.warning("Voiceprint failed for %s: %s", spk, exc)
 
@@ -270,6 +315,12 @@ class TranscribeRequest(BaseModel):
     language:   str = "it"
 
 
+class VoiceprintRequest(BaseModel):
+    wav_url:    str
+    segment_id: str
+    turns: list[dict]  # [{"speaker": str, "start_ms": int, "end_ms": int}, ...]
+
+
 @app.get("/health")
 def health():
     vram = round(torch.cuda.memory_allocated() / 1e9, 1) if torch.cuda.is_available() else 0.0
@@ -278,8 +329,47 @@ def health():
         "model":  f"whisperx-{MODEL_SIZE}",
         "device": DEVICE,
         "vram_gb": vram,
-        "voiceprint": _voiceprint_encoder is not None,
+        "voiceprint": _voiceprint_model is not None,
+        "voiceprint_model": "resnet293",
     }
+
+
+@app.post("/voiceprint")
+def voiceprint(req: VoiceprintRequest):
+    """Extract 256d ResNet293 embeddings for given speaker turns — no ASR.
+
+    Used by re-enrollment scripts. Each unique speaker in `turns` gets one
+    centroid embedding (concatenated audio, max 30s).
+
+    Returns: {"status": "done", "voiceprints": {"SPEAKER_XX": [256 floats], ...}}
+    """
+    if _voiceprint_model is None:
+        raise HTTPException(status_code=503, detail="Voiceprint model not loaded")
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    wav_path = tmp.name
+    tmp.close()
+
+    try:
+        _download_file(req.wav_url, wav_path)
+        audio_np, sr = sf.read(wav_path, dtype="float32", always_2d=False)
+        if audio_np.ndim > 1:
+            audio_np = audio_np.mean(axis=1)
+        if sr != 16000:
+            import resampy
+            audio_np = resampy.resample(audio_np, sr, 16000)
+
+        waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (1, T)
+        voiceprints = _extract_voiceprints(waveform, req.turns)
+    except Exception as exc:
+        logger.error("Voiceprint error for %s: %s", req.segment_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if os.path.exists(wav_path):
+            os.unlink(wav_path)
+
+    logger.info("Voiceprint %s — %d speakers", req.segment_id, len(voiceprints))
+    return {"status": "done", "voiceprints": voiceprints}
 
 
 @app.post("/transcribe")
