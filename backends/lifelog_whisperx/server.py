@@ -368,8 +368,8 @@ def voiceprint(req: VoiceprintRequest):
         if os.path.exists(wav_path):
             os.unlink(wav_path)
 
-    logger.info("Voiceprint %s — %d speakers", req.segment_id, len(voiceprints))
-    return {"status": "done", "voiceprints": voiceprints}
+    logger.info("Voiceprint %s -- %d speakers", req.segment_id, len(voiceprints))
+    return {"status": "done", "output": {"voiceprints": voiceprints}}
 
 
 @app.post("/transcribe")

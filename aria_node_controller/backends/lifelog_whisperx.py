@@ -53,13 +53,21 @@ class LifelogWhisperXBackend:
     def run(self, payload: dict, **kwargs) -> dict:
         local_ip = kwargs.get("local_ip", "127.0.0.1")
         server_url = f"http://{local_ip}:8091"
-        
-        body = {
-            "wav_url": payload["wav_url"],
-            "segment_id": payload.get("segment_id", ""),
-            "language": payload.get("language") or "it",
-        }
-        r = requests.post(f"{server_url}/transcribe", json=body, timeout=600)
+
+        if payload.get("voiceprint_only"):
+            body = {
+                "wav_url":    payload["wav_url"],
+                "segment_id": payload.get("segment_id", ""),
+                "turns":      payload.get("turns", []),
+            }
+            r = requests.post(f"{server_url}/voiceprint", json=body, timeout=300)
+        else:
+            body = {
+                "wav_url":    payload["wav_url"],
+                "segment_id": payload.get("segment_id", ""),
+                "language":   payload.get("language") or "it",
+            }
+            r = requests.post(f"{server_url}/transcribe", json=body, timeout=600)
         r.raise_for_status()
         return r.json()
 
