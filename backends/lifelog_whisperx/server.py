@@ -513,8 +513,9 @@ def transcribe(req: TranscribeRequest):
 
         t_vp = time.perf_counter()
         output = _to_contract(wx_result, audio_np, detected_lang)
-        logger.info("Voiceprint done in %.1fs -- %d speakers",
-                    time.perf_counter() - t_vp, len(output["voiceprints"]))
+        n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
+        logger.info("Voiceprint done in %.1fs -- %d turns with embedding",
+                    time.perf_counter() - t_vp, n_emb)
 
     except Exception as exc:
         logger.error("Pipeline error for %s: %s", req.segment_id, exc, exc_info=True)
@@ -524,12 +525,13 @@ def transcribe(req: TranscribeRequest):
             os.unlink(wav_path)
 
     elapsed = round(time.perf_counter() - t0, 2)
+    n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
     logger.info(
-        "Done %s in %.1fs -- %d chars, %d turns, %d voiceprints",
+        "Done %s in %.1fs -- %d chars, %d turns, %d with_embedding",
         req.segment_id, elapsed,
         len(output["transcript"]),
         len(output["speaker_turns"]),
-        len(output["voiceprints"]),
+        n_emb,
     )
 
     return {"status": "done", "processing_time": elapsed, "output": output}
