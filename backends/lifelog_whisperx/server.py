@@ -203,41 +203,48 @@ def _unload_models():
     logger.info("Models unloaded, VRAM freed.")
 
 
-def _extract_voiceprints(
-    waveform: torch.Tensor,   # (1, T) float32 at 16kHz
-    speaker_turns: list[dict],
-) -> dict[str, list[float]]:
-    """256d ResNet293 embedding per speaker, pooled over all their turns (max 30s)."""
+def _embed_turn(
+    waveform: torch.Tensor,  # (1, T) float32 at 16kHz
+    start_ms: int,
+    end_ms: int,
+) -> list[float] | None:
+    """256d ResNet293 embedding for a single speaker turn. Returns None if too short."""
     if _voiceprint_model is None:
-        return {}
-
+        return None
     sr = 16000
-    max_samples = sr * 30
+    s = int(start_ms / 1000 * sr)
+    e = int(end_ms   / 1000 * sr)
+    crop = waveform[:, s:e]
+    if crop.shape[1] < sr // 2:   # skip turns < 0.5 s
+        return None
     dev = next(_voiceprint_model.parameters()).device
+    crop = crop.to(dev)
+    try:
+        with torch.no_grad():
+            emb = _voiceprint_model(crop.unsqueeze(0))  # (1, 256)
+        return emb[0].cpu().tolist()
+    except Exception as exc:
+        logger.warning("Voiceprint failed [%d–%d ms]: %s", start_ms, end_ms, exc)
+        return None
 
-    # Collect audio crops per speaker
-    crops: dict[str, list[torch.Tensor]] = {}
-    for turn in speaker_turns:
-        spk = turn["speaker"]
-        s = int(turn["start_ms"] / 1000 * sr)
-        e = int(turn["end_ms"]   / 1000 * sr)
-        crop = waveform[:, s:e]
-        if crop.shape[1] > sr // 2:   # skip segments < 0.5s
-            crops.setdefault(spk, []).append(crop)
 
-    voiceprints: dict[str, list[float]] = {}
-    for spk, tensors in crops.items():
-        # concat: (1, T_total), cap at 30s
-        concat = torch.cat(tensors, dim=1)[:, :max_samples].to(dev)
-        try:
-            with torch.no_grad():
-                # WeSpeakerResNet293.forward expects (batch, channels, time)
-                emb = _voiceprint_model(concat.unsqueeze(0))  # (1, 256)
-            voiceprints[spk] = emb[0].cpu().tolist()
-        except Exception as exc:
-            logger.warning("Voiceprint failed for %s: %s", spk, exc)
+def _vp_confidence(
+    logprob: float,
+    duration_s: float,
+    word_count: int,
+    no_speech_prob: float,
+) -> float:
+    """Reliability score [0.0–1.0] for a per-turn voiceprint embedding.
 
-    return voiceprints
+    Combines ASR quality (logprob), audio quantity (duration + word count),
+    and speech presence (no_speech_prob) into a single trustworthiness score.
+    Stage C uses this to weight identity matching and chimera detection.
+    """
+    lp  = max(0.0, min(1.0, (logprob + 0.45) / 0.45))         # 0 at −0.45, 1 at 0.0
+    dur = max(0.0, min(1.0, (duration_s - 2.0) / 8.0))         # 0 at 2 s,   1 at 10 s+
+    wc  = max(0.0, min(1.0, (word_count - 5)  / 15.0))         # 0 at 5 w,   1 at 20 w+
+    ns  = max(0.0, min(1.0, (0.5 - no_speech_prob) / 0.4))     # penalises silence
+    return round(0.40 * lp + 0.30 * dur + 0.20 * wc + 0.10 * ns, 3)
 
 
 def _to_contract(
@@ -245,19 +252,25 @@ def _to_contract(
     audio_np: np.ndarray,   # float32 mono 16kHz
     language: str,
 ) -> dict:
-    """Convert whisperx output to the Stage C contract (same as qwen3-asr)."""
+    """Convert whisperx output to the Stage C contract.
+
+    Each speaker_turn now carries its own voiceprint embedding (256d ResNet293)
+    and vp_confidence score, replacing the old top-level voiceprints dict that
+    produced a single centroid per speaker label regardless of how many distinct
+    speakers pyannote had conflated under that label.
+    """
     sr = 16000
     duration_ms = int(len(audio_np) / sr * 1000)
     segments = wx_result.get("segments", [])
 
-    # speaker_turns: merge consecutive same-speaker segments, times in ms
-    speaker_turns: list[dict] = []
-    # Lists to store the raw logprobs and no_speech_probs of segments grouped into each turn
-    turn_logprobs: list[list[float]] = []
-    turn_nospeechs: list[list[float]] = []
+    speaker_turns:          list[dict]        = []
+    turn_logprobs:          list[list[float]] = []
+    turn_nospeechs:         list[list[float]] = []
+    turn_word_counts:       list[int]         = []
+    turn_word_scores:       list[list[float]] = []   # wav2vec2 alignment scores per word
+    turn_compression_ratios: list[list[float]] = []  # Whisper internal compression ratio
 
-    # Gather data for root transcription_quality (on all raw segments)
-    raw_logprobs: list[float] = []
+    raw_logprobs:  list[float] = []
     raw_nospeechs: list[float] = []
 
     for seg in segments:
@@ -272,63 +285,92 @@ def _to_contract(
         nospeech = seg.get("no_speech_prob")
         if nospeech is None:
             nospeech = 0.1
+        compression_ratio = seg.get("compression_ratio", 1.0)
 
         raw_logprobs.append(logprob)
         raw_nospeechs.append(nospeech)
+
+        # word-level signals from wav2vec2 alignment
+        seg_words = seg.get("words", [])
+        seg_wc = len(seg_words)
+        seg_word_scores = [w["score"] for w in seg_words if w.get("score") is not None]
 
         if speaker_turns and speaker_turns[-1]["speaker"] == spk:
             speaker_turns[-1]["end_ms"] = e_ms
             speaker_turns[-1]["text"]   = (speaker_turns[-1]["text"] + " " + text).strip()
             turn_logprobs[-1].append(logprob)
             turn_nospeechs[-1].append(nospeech)
+            turn_word_counts[-1] += seg_wc
+            turn_word_scores[-1].extend(seg_word_scores)
+            turn_compression_ratios[-1].append(compression_ratio)
         else:
             speaker_turns.append({"speaker": spk, "start_ms": s_ms, "end_ms": e_ms, "text": text})
             turn_logprobs.append([logprob])
             turn_nospeechs.append([nospeech])
+            turn_word_counts.append(seg_wc)
+            turn_word_scores.append(list(seg_word_scores))
+            turn_compression_ratios.append([compression_ratio])
 
-    # Calculate average logprob and no_speech_prob per speaker turn
+    # Per-turn quality metrics + individual voiceprint embedding
+    waveform = torch.from_numpy(audio_np).unsqueeze(0)
     for i, turn in enumerate(speaker_turns):
-        turn["avg_logprob"] = round(sum(turn_logprobs[i]) / len(turn_logprobs[i]), 4)
-        turn["no_speech_prob"] = round(sum(turn_nospeechs[i]) / len(turn_nospeechs[i]), 4)
+        lp  = round(sum(turn_logprobs[i])  / len(turn_logprobs[i]),  4)
+        nsp = round(sum(turn_nospeechs[i]) / len(turn_nospeechs[i]), 4)
+        wc  = turn_word_counts[i]
+        dur_s = (turn["end_ms"] - turn["start_ms"]) / 1000.0
+        scores = turn_word_scores[i]
+        crs    = turn_compression_ratios[i]
 
-    # word_timestamps: from word_segments, times in ms
+        turn["avg_logprob"]            = lp
+        turn["no_speech_prob"]         = nsp
+        turn["word_count"]             = wc
+        turn["n_segments_merged"]      = len(turn_logprobs[i])
+        turn["avg_word_score"]         = round(sum(scores) / len(scores), 4) if scores else None
+        turn["avg_compression_ratio"]  = round(sum(crs) / len(crs), 4)
+
+        emb = _embed_turn(waveform, turn["start_ms"], turn["end_ms"])
+        turn["embedding"]     = emb
+        turn["vp_confidence"] = (
+            _vp_confidence(lp, dur_s, wc, nsp) if emb is not None else 0.0
+        )
+
+    # word_timestamps: flat list with ms timestamps + wav2vec2 alignment score
     word_timestamps: list[dict] = []
     for w in wx_result.get("word_segments", []):
-        word_timestamps.append({
+        entry: dict = {
             "word":     w.get("word", ""),
             "start_ms": int(w.get("start", 0) * 1000),
             "end_ms":   int(w.get("end",   0) * 1000),
-        })
+        }
+        if w.get("score") is not None:
+            entry["score"] = round(w["score"], 4)
+        word_timestamps.append(entry)
 
-    # voiceprints: need waveform as torch tensor (1, T)
-    waveform = torch.from_numpy(audio_np).unsqueeze(0)
-    voiceprints = _extract_voiceprints(waveform, speaker_turns)
-
-    # Calculate global transcription quality metrics
+    # Global transcription quality
     n_segments = len(segments)
     if n_segments > 0:
-        avg_logprob_mean = sum(raw_logprobs) / n_segments
+        avg_logprob_mean    = sum(raw_logprobs) / n_segments
         no_speech_prob_mean = sum(raw_nospeechs) / n_segments
-        no_speech_prob_max = max(raw_nospeechs)
+        no_speech_prob_max  = max(raw_nospeechs)
     else:
-        avg_logprob_mean = -0.5
-        no_speech_prob_mean = 0.1
-        no_speech_prob_max = 0.1
+        avg_logprob_mean = no_speech_prob_mean = no_speech_prob_max = 0.0
 
     transcription_quality = {
-        "avg_logprob_mean": round(avg_logprob_mean, 4),
+        "avg_logprob_mean":    round(avg_logprob_mean,    4),
         "no_speech_prob_mean": round(no_speech_prob_mean, 4),
-        "no_speech_prob_max": round(no_speech_prob_max, 4),
-        "n_segments": n_segments
+        "no_speech_prob_max":  round(no_speech_prob_max,  4),
+        "n_segments":          n_segments,
     }
 
+    n_emb = sum(1 for t in speaker_turns if t.get("embedding") is not None)
+    logger.info("_to_contract: %d turns, %d with embedding", len(speaker_turns), n_emb)
+
     return {
-        "transcript":      " ".join(s.get("text", "") for s in segments).strip(),
-        "language":        language,
-        "duration_ms":     duration_ms,
-        "speaker_turns":   speaker_turns,
-        "word_timestamps": word_timestamps,
-        "voiceprints":     voiceprints,
+        "transcript":            " ".join(s.get("text", "") for s in segments).strip(),
+        "language":              language,
+        "duration_ms":           duration_ms,
+        "speaker_turns":         speaker_turns,
+        "word_timestamps":       word_timestamps,
         "transcription_quality": transcription_quality,
     }
 
@@ -406,7 +448,21 @@ def voiceprint(req: VoiceprintRequest):
             audio_np = resampy.resample(audio_np, sr, 16000)
 
         waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (1, T)
-        voiceprints = _extract_voiceprints(waveform, req.turns)
+
+        # Embed each turn individually, then centroid per label (enrollment use case)
+        from collections import defaultdict
+        per_label: dict[str, list[list[float]]] = defaultdict(list)
+        for turn in req.turns:
+            emb = _embed_turn(waveform, turn["start_ms"], turn["end_ms"])
+            if emb is not None:
+                per_label[turn["speaker"]].append(emb)
+
+        voiceprints: dict[str, list[float]] = {}
+        for label, embs in per_label.items():
+            dim = len(embs[0])
+            centroid = [sum(e[d] for e in embs) / len(embs) for d in range(dim)]
+            voiceprints[label] = centroid
+
     except Exception as exc:
         logger.error("Voiceprint error for %s: %s", req.segment_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
