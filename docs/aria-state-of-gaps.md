@@ -58,6 +58,31 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 
 ## Gap Risolti
 
+### A0-6 — Backend legati a 127.0.0.1 — irraggiungibili da IP esterno
+**Stato:** resolved
+**Risolto:** 2026-05-17
+**Descrizione:** Tutti i backend FastAPI/uvicorn su PC139 erano in listen su `127.0.0.1:{PORT}`. Dopo la fix health-check Firebase Studio (orchestratore usa `self.local_ip` = `192.168.1.139` invece di `localhost`), le richieste arrivavano all'IP esterno e venivano rifiutate con `Connection refused`. Il server bound a loopback non accetta connessioni dall'IP di rete.
+**Backend interessati:** FLUX 8092, WhisperX 8091, Lifelog ASR 8087, Audiocraft 8086, AceStep wrapper.
+**Soluzione:** migrati tutti a `host="0.0.0.0"` (uvicorn) o `--host 0.0.0.0` (argparse). Fix applicato via script `fix_hosts.py` distribuito su PC139. Commit `ca25b05` (ARIA master).
+
+---
+
+### A0-5 — Nessun backend image generation su ARIA
+**Stato:** resolved
+**Risolto:** 2026-05-16
+**Descrizione:** ARIA non aveva alcun backend per la generazione di immagini. Lifelog2 Stage G richiedeva un modello text-to-image per generare cover degli episodi.
+**Soluzione adottata:**
+- Env `flux-aria` (Python 3.12, PyTorch 2.x+cu128)
+- Modello: `FLUX.2-klein-4B` (~15.8 GB VRAM)
+- Backend `backends/flux_imagegen/server.py` su porta 8092 (binding `0.0.0.0`)
+- Coda Redis: `aria:q:imagegen:local:flux2-klein-4b:lifelog`
+- Callback: `image_url = http://192.168.1.139:8082/{job_id}.jpeg` (asset server), `job_id` nel payload output
+- Endpoint `DELETE /output/{filename}` per cleanup locale post-download
+- Timing: ~10-11s/immagine (512×512, 20 steps), VRAM 12.8 GB
+- E2E testato: 12/12 cover episodi generate e caricate su MinIO (2026-05-17)
+
+---
+
 ### A0-3 — Nessun backend LLM dedicato per Lifelog2 Stage D
 **Stato:** resolved  
 **Risolto:** 2026-05-13  

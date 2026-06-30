@@ -341,11 +341,12 @@ class BaseBackend(ABC):
 | `llm` | `gemini-flash-lite` | Cloud | Google Gateway | text |
 | `mus` | `acestep-1.5-xl-sft` | 8 GB | ACE-Step DiT XL (wrapper 8084) | WAV 44.1kHz stereo |
 | `mus` | `audiocraft-medium` | 4-6 GB | AudioGen / MusicGen (wrapper 8086) | WAV 44.1kHz stereo |
-| `stt` | `whisperx-large-v3` | 10 GB | WhisperX + pyannote + wespeaker (porta 8091) | JSON: transcript + speaker turns + voiceprint 256d |
+| `stt` | `whisperx-large-v3` | 10 GB | WhisperX + pyannote + wespeaker (porta 8091) | JSON: transcript + speaker turns (con avg_logprob/no_speech_prob) + voiceprint 256d + transcription_quality |
 | `stt` | `qwen3-asr-1.7b` | 9 GB | Qwen3-ASR + ForcedAligner + pyannote (porta 8087, ⏸️ standby) | JSON: transcript + speaker turns + voiceprint 256d |
 | `llm` | `qwen3-14b-q4km` | 9 GB | llama-server.exe GGUF (porta 8090, Lifelog2) | JSON: MemoryAtom (summary, topics, entities, speaker_turns_annotated) |
 
 > **Critico per nuovi backend STT/LLM:** ogni nuovo `model_id` deve essere aggiunto alla lista `model_logic_ids` nel metodo `_run_loop()` di `orchestrator.py`. ARIA scansiona Redis solo per i model IDs in questa lista — se manca, la coda è invisibile e i task restano bloccati indefinitamente. Non è auto-discovery, è un registro hardcoded.
+
 
 ### Nota su VRAM e coesistenza
 
@@ -566,15 +567,29 @@ ARIA può risolvere il modello locale (Qwen 3.5) o il provider Cloud (Gemini).
 }
 ```
 
-**Image Generation (model_type: image)**:
+**Image Generation (model_type: imagegen) — implementato con FLUX.2-klein-4B**:
 ```json
 {
-  "theme": "monastic_dark",      // ARIA resolves style, negative prompt, etc.
+  "job_id": "uuid",
   "prompt": "A dark monastery library, candlelight",
-  "width": 1024,
-  "height": 1024
+  "width": 512,
+  "height": 512,
+  "steps": 20,
+  "output_key": null
 }
 ```
+
+Callback output (campo `output` nel risultato Redis):
+```json
+{
+  "job_id": "uuid",
+  "image_url": "http://192.168.1.139:8082/{job_id}.jpeg",
+  "local_path": "C:\\Users\\Roberto\\aria\\data\\outputs\\{job_id}.jpeg",
+  "processing_time_seconds": 10.4
+}
+```
+
+Pattern di cleanup: il client scarica da `image_url`, persiste il file (es. MinIO), poi chiama `DELETE http://192.168.1.139:8092/output/{job_id}.jpeg` per liberare disco su PC139. Il backend FLUX espone questo endpoint DELETE direttamente (non passa per l'asset server).
 
 **Speech-to-Text (model_type: stt)**:
 ```json

@@ -140,9 +140,29 @@ Pattern standard ARIA: `aria:q:{type}:local:{model_id}:{client_id}`
     "transcript": "Allora oggi ho parlato con Francesco del progetto...",
     "language": "it",
     "duration_ms": 299800,
+    "transcription_quality": {
+      "avg_logprob_mean": -0.35,
+      "no_speech_prob_mean": 0.02,
+      "no_speech_prob_max": 0.08,
+      "n_segments": 12
+    },
     "speaker_turns": [
-      {"speaker": "SPEAKER_00", "start_ms": 0, "end_ms": 12400, "text": "Allora oggi ho parlato con Francesco del progetto"},
-      {"speaker": "SPEAKER_01", "start_ms": 12800, "end_ms": 31200, "text": "Sì esatto, e la scadenza è giovedì"}
+      {
+        "speaker": "SPEAKER_00",
+        "start_ms": 0,
+        "end_ms": 12400,
+        "text": "Allora oggi ho parlato con Francesco del progetto",
+        "avg_logprob": -0.35,
+        "no_speech_prob": 0.02
+      },
+      {
+        "speaker": "SPEAKER_01",
+        "start_ms": 12800,
+        "end_ms": 31200,
+        "text": "Sì esatto, e la scadenza è giovedì",
+        "avg_logprob": -0.5,
+        "no_speech_prob": 0.1
+      }
     ],
     "word_timestamps": [
       {"word": "Allora", "start_ms": 0, "end_ms": 420},

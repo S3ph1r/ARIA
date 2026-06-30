@@ -252,17 +252,44 @@ def _to_contract(
 
     # speaker_turns: merge consecutive same-speaker segments, times in ms
     speaker_turns: list[dict] = []
+    # Lists to store the raw logprobs and no_speech_probs of segments grouped into each turn
+    turn_logprobs: list[list[float]] = []
+    turn_nospeechs: list[list[float]] = []
+
+    # Gather data for root transcription_quality (on all raw segments)
+    raw_logprobs: list[float] = []
+    raw_nospeechs: list[float] = []
+
     for seg in segments:
         spk  = seg.get("speaker", "SPEAKER_00")
         s_ms = int(seg.get("start", 0) * 1000)
         e_ms = int(seg.get("end",   0) * 1000)
         text = seg.get("text", "").strip()
 
+        logprob = seg.get("avg_logprob")
+        if logprob is None:
+            logprob = -0.5
+        nospeech = seg.get("no_speech_prob")
+        if nospeech is None:
+            nospeech = 0.1
+
+        raw_logprobs.append(logprob)
+        raw_nospeechs.append(nospeech)
+
         if speaker_turns and speaker_turns[-1]["speaker"] == spk:
             speaker_turns[-1]["end_ms"] = e_ms
             speaker_turns[-1]["text"]   = (speaker_turns[-1]["text"] + " " + text).strip()
+            turn_logprobs[-1].append(logprob)
+            turn_nospeechs[-1].append(nospeech)
         else:
             speaker_turns.append({"speaker": spk, "start_ms": s_ms, "end_ms": e_ms, "text": text})
+            turn_logprobs.append([logprob])
+            turn_nospeechs.append([nospeech])
+
+    # Calculate average logprob and no_speech_prob per speaker turn
+    for i, turn in enumerate(speaker_turns):
+        turn["avg_logprob"] = round(sum(turn_logprobs[i]) / len(turn_logprobs[i]), 4)
+        turn["no_speech_prob"] = round(sum(turn_nospeechs[i]) / len(turn_nospeechs[i]), 4)
 
     # word_timestamps: from word_segments, times in ms
     word_timestamps: list[dict] = []
@@ -277,6 +304,24 @@ def _to_contract(
     waveform = torch.from_numpy(audio_np).unsqueeze(0)
     voiceprints = _extract_voiceprints(waveform, speaker_turns)
 
+    # Calculate global transcription quality metrics
+    n_segments = len(segments)
+    if n_segments > 0:
+        avg_logprob_mean = sum(raw_logprobs) / n_segments
+        no_speech_prob_mean = sum(raw_nospeechs) / n_segments
+        no_speech_prob_max = max(raw_nospeechs)
+    else:
+        avg_logprob_mean = -0.5
+        no_speech_prob_mean = 0.1
+        no_speech_prob_max = 0.1
+
+    transcription_quality = {
+        "avg_logprob_mean": round(avg_logprob_mean, 4),
+        "no_speech_prob_mean": round(no_speech_prob_mean, 4),
+        "no_speech_prob_max": round(no_speech_prob_max, 4),
+        "n_segments": n_segments
+    }
+
     return {
         "transcript":      " ".join(s.get("text", "") for s in segments).strip(),
         "language":        language,
@@ -284,6 +329,7 @@ def _to_contract(
         "speaker_turns":   speaker_turns,
         "word_timestamps": word_timestamps,
         "voiceprints":     voiceprints,
+        "transcription_quality": transcription_quality,
     }
 
 
