@@ -1,6 +1,6 @@
 # Lifelog WhisperX — Backend STT per ARIA
 
-> **Aggiornato**: 2026-05-14
+> **Aggiornato**: 2026-07-28
 > **Ambiente**: `%ARIA_ROOT%\envs\lifelog-whisperx` (Python 3.12)
 > **Porta**: 8091
 > **Stato**: ✅ Operativo (Blackwell Stable, confermato 2026-05-14)
@@ -19,10 +19,57 @@ integrati (pyannote wespeaker-resnet34-LM) e diarizzazione nativa.
 - **Trascrizione multilingue**: 99 lingue, rilevamento automatico. Primario: italiano
 - **Word timestamps**: wav2vec2 forced alignment, ~30ms di precisione
 - **Diarizzazione speaker**: pyannote community-1 — chi parla, quando
+- **Turni tagliati per parola** (dal 2026-07-28): i confini di turno seguono il cambio di
+  speaker **della singola parola**, non l'etichetta dominante del segmento — vedi §2bis
 - **Voiceprint embedding**: wespeaker-resnet34-LM, vettore 256d per speaker, pooling su max 30s
 - **Output contract identico a Qwen3-ASR**: Stage C è model-agnostic
 
 ---
+
+## 2bis. Costruzione dei turni — taglio per parola (2026-07-28)
+
+**Cosa cambia**: i `speaker_turns` non si costruiscono più dall'etichetta di
+segmento, ma dal campo `speaker` della **singola parola** che
+`whisperx.assign_word_speakers` assegna già.
+
+**Perché** — WhisperX sceglie lo speaker di un *segmento* per durata dominante
+(dal sorgente: *"sum intersection durations per speaker and pick the dominant
+one"*). Un segmento a cavallo di due parlanti collassa quindi sul maggioritario
+e **le parole dell'altro vengono assorbite**. Il codice precedente concatenava
+poi i segmenti consecutivi con la stessa etichetta, allungando ulteriormente il
+blocco.
+
+Effetto misurato sui dati Lifelog2 prima della correzione: turni da 37 s
+contenenti domanda e risposta di persone diverse, `n_segments_merged` fino a
+**79**, un turno da **299 s** (un intero segmento da 5 minuti in un turno solo),
+53% dei turni senza voiceprint utilizzabile perché l'embedding era una media di
+più voci.
+
+**Comportamento nuovo**
+
+| situazione | esito |
+|---|---|
+| segmento a cavallo di due parlanti | **due turni distinti** |
+| stesso parlante su più segmenti consecutivi | **un turno solo** (invariato) |
+| parola senza `speaker` assegnato | ricade sullo speaker del segmento |
+| segmento senza allineamento a parole | resta un blocco unico (comportamento precedente) |
+| parola senza timestamp | eredita l'ultimo tempo noto, non viene persa |
+
+**Campi del contratto**: invariati nei nomi. Cambiano le *semantiche* di due:
+
+- `text` del turno è ora la concatenazione delle sue parole (prima era il testo
+  di segmento) — necessario, dato che un turno può coprire mezzo segmento
+- `n_segments_merged` conta i **segmenti sorgente distinti** da cui il turno
+  attinge (prima: quanti segmenti erano stati concatenati). Resta l'indicatore
+  di quanto materiale eterogeneo confluisce nel turno
+
+`avg_logprob`, `no_speech_prob` e `avg_compression_ratio` sono grandezze di
+segmento: si contano **una volta per segmento sorgente**, non una per parola.
+
+**Nota storica**: `backends/lifelog_asr` (qwen3-asr, porta 8087, in standby) ha
+lo stesso contratto ma **non** questa correzione. Se tornasse in servizio
+produrrebbe turni con la vecchia semantica.
+
 
 ## 2. Stack modelli
 
@@ -165,8 +212,8 @@ Pattern standard ARIA: `aria:q:{type}:local:{model_id}:{client_id}`
       }
     ],
     "word_timestamps": [
-      {"word": "Allora", "start_ms": 0, "end_ms": 420},
-      {"word": "oggi", "start_ms": 440, "end_ms": 680}
+      {"word": "Allora", "start_ms": 0, "end_ms": 420, "score": 0.87, "speaker": "SPEAKER_00"},
+      {"word": "oggi", "start_ms": 440, "end_ms": 680, "score": 0.91, "speaker": "SPEAKER_00"}
     ],
     "voiceprints": {
       "SPEAKER_00": [0.123, -0.456, ...],
