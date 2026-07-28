@@ -300,6 +300,134 @@ def _log_diarization_stats(diarize_df, speaker_embeddings=None) -> dict:
     return stats
 
 
+# Soglie del taglio mirato. Tarate sulla distribuzione misurata in Lifelog2 il
+# 2026-07-29 e volutamente conservative: meglio lasciare fuso un turno dubbio
+# che rifare la frammentazione del tentativo precedente.
+SPLIT_MIN_MERGED   = 9      # sotto questa fusione il turno non si tocca
+SPLIT_MIN_RUN_MS   = 1500   # un cambio parlante più breve è rumore, non un turno
+SPLIT_MIN_RUN_WORDS = 4     # idem: sotto 4 parole non si apre un turno nuovo
+
+
+def _split_fused_turns(
+    turns: list[dict],
+    logprobs: list[list[float]],
+    nospeechs: list[list[float]],
+    word_counts: list[int],
+    word_scores: list[list[float]],
+    compression_ratios: list[list[float]],
+    word_segments: list[dict],
+    segments: list[dict],
+) -> tuple[list[dict], list[list[float]], list[list[float]], list[int],
+           list[list[float]], list[list[float]]]:
+    """Spezza i soli turni gravemente fusi nei punti in cui il parlante cambia
+    **in modo sostenuto**, secondo lo speaker per parola di assign_word_speakers.
+
+    I metriche per segmento (logprob, no_speech, compression_ratio) non sono
+    ripartibili sui sotto-turni: un sotto-turno copre una porzione di segmenti
+    che non conosciamo. Vengono ereditate dal turno padre, ed è
+    un'approssimazione dichiarata — quelle grandezze servono a valutare il
+    TESTO, che nel padre e nei figli è lo stesso materiale. Le grandezze che
+    invece cambiano davvero (conteggio parole, punteggio di allineamento,
+    n_segments_merged) sono ricalcolate sulle parole del sotto-turno.
+    """
+    out_turns: list[dict] = []
+    out_lp: list[list[float]] = []
+    out_ns: list[list[float]] = []
+    out_wc: list[int] = []
+    out_ws: list[list[float]] = []
+    out_cr: list[list[float]] = []
+    n_split = 0
+
+    for i, turn in enumerate(turns):
+        n_merged = len(logprobs[i])
+        words = [
+            w for w in word_segments
+            if w.get("speaker") is not None
+            and turn["start_ms"] <= int(w.get("start", 0) * 1000) < turn["end_ms"]
+        ]
+
+        if n_merged < SPLIT_MIN_MERGED or len(words) < SPLIT_MIN_RUN_WORDS * 2:
+            out_turns.append(turn)
+            out_lp.append(logprobs[i]); out_ns.append(nospeechs[i])
+            out_wc.append(word_counts[i]); out_ws.append(word_scores[i])
+            out_cr.append(compression_ratios[i])
+            continue
+
+        # Sequenze consecutive di parole con lo stesso parlante.
+        runs: list[list[dict]] = []
+        for w in words:
+            if runs and runs[-1][0].get("speaker") == w.get("speaker"):
+                runs[-1].append(w)
+            else:
+                runs.append([w])
+
+        # Riassorbe le sequenze troppo corte nella precedente: sono le
+        # alternanze spurie che avevano rovinato il tentativo del 28/07.
+        merged_runs: list[list[dict]] = []
+        for run in runs:
+            dur_ms = int(run[-1].get("end", 0) * 1000) - int(run[0].get("start", 0) * 1000)
+            too_short = dur_ms < SPLIT_MIN_RUN_MS or len(run) < SPLIT_MIN_RUN_WORDS
+            if too_short and merged_runs:
+                merged_runs[-1].extend(run)
+            elif too_short and not merged_runs:
+                merged_runs.append(run)          # la prima non ha dove confluire
+            else:
+                merged_runs.append(run)
+
+        # Ricucitura: riassorbire una sequenza spuria lascia due tratti dello
+        # STESSO parlante separati dal buco che si è appena chiuso. Senza questo
+        # passaggio il taglio produrrebbe frammentazione al posto di ripararla —
+        # è il modo in cui il tentativo del 28/07 si autosabotava.
+        coalesced: list[list[dict]] = []
+        for run in merged_runs:
+            if coalesced and coalesced[-1][0].get("speaker") == run[0].get("speaker"):
+                coalesced[-1].extend(run)
+            else:
+                coalesced.append(run)
+        merged_runs = coalesced
+
+        if len(merged_runs) < 2:
+            out_turns.append(turn)
+            out_lp.append(logprobs[i]); out_ns.append(nospeechs[i])
+            out_wc.append(word_counts[i]); out_ws.append(word_scores[i])
+            out_cr.append(compression_ratios[i])
+            continue
+
+        n_split += 1
+        for run in merged_runs:
+            scores = [w["score"] for w in run if w.get("score") is not None]
+            s_ms = int(run[0].get("start", 0) * 1000)
+            e_ms = int(run[-1].get("end", 0) * 1000)
+            # n_segments_merged va ricalcolato sul sotto-turno: ereditare quello
+            # del padre (anche 29) lo farebbe marcare come fuso proprio dopo
+            # averlo separato, che è il contrario di ciò che stiamo facendo.
+            n_seg = sum(
+                1 for sg in segments
+                if int(sg.get("start", 0) * 1000) < e_ms
+                and int(sg.get("end", 0) * 1000) > s_ms
+            )
+            out_turns.append({
+                "speaker":  run[0].get("speaker") or turn["speaker"],
+                "start_ms": s_ms,
+                "end_ms":   e_ms,
+                "text":     " ".join(w.get("word", "") for w in run).strip(),
+                "_n_segments_merged": max(1, n_seg),
+                "split_from_fused": True,
+            })
+            out_lp.append(list(logprobs[i]))
+            out_ns.append(list(nospeechs[i]))
+            out_cr.append(list(compression_ratios[i]))
+            out_wc.append(len(run))
+            out_ws.append(scores)
+
+    if n_split:
+        logger.info(
+            "split turni fusi: %d turni oltre %d segmenti spezzati, %d → %d turni totali",
+            n_split, SPLIT_MIN_MERGED, len(turns), len(out_turns),
+        )
+    return out_turns, out_lp, out_ns, out_wc, out_ws, out_cr
+
+
 def _to_contract(
     wx_result: dict,
     audio_np: np.ndarray,   # float32 mono 16kHz
@@ -379,6 +507,30 @@ def _to_contract(
             turn_word_scores.append(list(seg_word_scores))
             turn_compression_ratios.append([compression_ratio])
 
+    # ── Taglio mirato dei turni fusi (2026-07-29) ────────────────────────────
+    # Misurato su 7900 turni reali in Lifelog2:
+    #   n_segments_merged=1  → 2694 turni, durata media   4.4s   (funzionano)
+    #   n_segments_merged>=9 →  965 turni, durata media 195.9s   (rotti)
+    # I secondi sono blocchi da tre minuti in cui pyannote ha detto "sempre lo
+    # stesso parlante" e la fusione ha inglobato gli interlocutori: l'embedding
+    # risultante è la media di più voci e fabbrica identità inesistenti.
+    #
+    # Il 2026-07-28 avevamo provato a costruire TUTTI i turni per parola: troppa
+    # frammentazione (30% dei turni ridotti a 1-2 parole, alternanze A-B-A
+    # spurie), e l'abbiamo annullato. L'idea non era sbagliata, lo era applicarla
+    # ovunque. Qui si taglia solo il 12% dei turni già degenerati, e solo dove il
+    # cambio di parlante **dura**: sotto MIN_RUN la sequenza viene riassorbita
+    # nel vicino, che è esattamente il rumore che ci aveva fregato.
+    #
+    # Il taglio avviene prima del ciclo degli embedding, così ogni sotto-turno
+    # riceve il proprio embedding sui confini nuovi invece di ereditare la media.
+    speaker_turns, turn_logprobs, turn_nospeechs, turn_word_counts, \
+        turn_word_scores, turn_compression_ratios = _split_fused_turns(
+            speaker_turns, turn_logprobs, turn_nospeechs, turn_word_counts,
+            turn_word_scores, turn_compression_ratios,
+            wx_result.get("word_segments", []), segments,
+        )
+
     # Per-turn quality metrics + individual voiceprint embedding
     waveform = torch.from_numpy(audio_np).unsqueeze(0)
     for i, turn in enumerate(speaker_turns):
@@ -394,7 +546,7 @@ def _to_contract(
         turn["avg_logprob"]            = lp
         turn["no_speech_prob"]         = nsp
         turn["word_count"]             = wc
-        turn["n_segments_merged"]      = len(turn_logprobs[i])
+        turn["n_segments_merged"]      = turn.pop("_n_segments_merged", len(turn_logprobs[i]))
         turn["avg_word_score"]         = round(sum(scores) / len(scores), 4) if scores else None
         turn["avg_compression_ratio"]  = round(sum(crs) / len(crs), 4)
 

@@ -365,3 +365,78 @@ Stage C su CT190 (`lifelog:stream:asr`):
 
 *Lifelog WhisperX Backend — Maggio 2026*
 *Documenti correlati: [ARIA Service Registry](../ARIA-Service-Registry.md), [Lifelog ASR (qwen3)](lifelog-asr.md)*
+
+---
+
+## 10. Taglio mirato dei turni fusi (2026-07-29)
+
+### Il problema, misurato
+
+Su 7900 turni reali in Lifelog2, distribuzione di `n_segments_merged`:
+
+| segmenti fusi | turni | durata media | testo affidabile |
+|---|---|---|---|
+| 1 | 2694 | 4.4s | 51.1% |
+| 2-3 | 1965 | 16.9s | 58.4% |
+| 4-8 | 1327 | 41.7s | 63.8% |
+| **9+** | **965** | **195.9s** | **76.7%** |
+
+I turni con 9 o più segmenti fusi durano in media più di tre minuti: sono
+blocchi in cui pyannote ha dichiarato lo stesso parlante per l'intera durata e
+la fusione ha inglobato gli interlocutori. Letti a mano contengono
+palesemente due o più persone che si rispondono — l'embedding che ne esce è la
+media di più voci e in Lifelog2 fabbrica identità inesistenti.
+
+Da notare il paradosso nell'ultima colonna: **più la fusione è grave, più il
+testo sembra affidabile**. È aritmetica — un blocco da tre minuti ha centinaia
+di parole, quindi `logprob` e `avg_word_score` si mediano bene. Una metrica
+unica di qualità premierebbe esattamente i turni più rotti.
+
+### Perché ora funziona e il 2026-07-28 no
+
+Il tentativo precedente ricostruiva **tutti** i turni a livello di parola e
+frammentava: 30% dei turni ridotti a 1-2 parole, alternanze A-B-A spurie
+(vedi §2bis). Fu annullato con `06c074f`.
+
+Due differenze:
+
+1. **Si tocca solo il 12% già degenerato** (`n_segments_merged >= 9`). I 2694
+   turni da un segmento, che durano 4.4s e funzionano, restano intatti.
+2. **Si taglia solo dove il cambio di parlante dura.** Una sequenza di parole
+   sotto `SPLIT_MIN_RUN_MS` (1500ms) o `SPLIT_MIN_RUN_WORDS` (4) viene
+   riassorbita nella precedente invece di aprire un turno.
+
+Segue una **ricucitura**: riassorbire una sequenza spuria lascia due tratti
+dello stesso parlante separati dal buco appena chiuso, e senza rifonderli il
+taglio produrrebbe frammentazione al posto di ripararla. È il modo preciso in
+cui il tentativo precedente si autosabotava.
+
+### Verifica offline (senza GPU)
+
+| caso | atteso | esito |
+|---|---|---|
+| A / interiezione 0.2s / A / B / A | 3 turni (A, B, A) | 3 turni |
+| un solo parlante per 15s | intatto | 1 turno |
+| alternanza ogni 0.3s (patologica) | **non** frammentare | 1 turno |
+
+Il terzo è il controllo decisivo: è la firma del fallimento precedente.
+
+### Dettagli di implementazione
+
+Il taglio avviene **prima** del ciclo degli embedding, così ogni sotto-turno
+riceve il proprio embedding sui confini nuovi invece di ereditare la media del
+padre — è tutto il punto dell'operazione.
+
+`n_segments_merged` viene **ricalcolato** contando i segmenti Whisper che si
+sovrappongono al sotto-turno: ereditarlo dal padre (anche 29) marcherebbe il
+sotto-turno come fuso proprio dopo averlo separato.
+
+`avg_logprob`, `no_speech_prob` e `avg_compression_ratio` sono grandezze per
+segmento e non sono ripartibili: i sotto-turni le ereditano dal padre. È
+un'approssimazione dichiarata e accettabile, perché quelle misure valutano il
+**testo**, che nel padre e nei figli è lo stesso materiale. Le grandezze che
+cambiano davvero — `word_count`, `avg_word_score`, `n_segments_merged` — sono
+ricalcolate sulle parole del sotto-turno.
+
+I turni prodotti dal taglio portano `split_from_fused: true`, così il
+consumatore può distinguerli e misurarne l'effetto.
