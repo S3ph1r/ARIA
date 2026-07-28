@@ -19,57 +19,79 @@ integrati (pyannote wespeaker-resnet34-LM) e diarizzazione nativa.
 - **Trascrizione multilingue**: 99 lingue, rilevamento automatico. Primario: italiano
 - **Word timestamps**: wav2vec2 forced alignment, ~30ms di precisione
 - **Diarizzazione speaker**: pyannote community-1 — chi parla, quando
-- **Turni tagliati per parola** (dal 2026-07-28): i confini di turno seguono il cambio di
-  speaker **della singola parola**, non l'etichetta dominante del segmento — vedi §2bis
+- **Segnali di affidabilità della diarizzazione** (dal 2026-07-28): speaker per parola,
+  embedding per parlante, statistiche sugli intervalli grezzi di pyannote — vedi §2bis
 - **Voiceprint embedding**: wespeaker-resnet34-LM, vettore 256d per speaker, pooling su max 30s
 - **Output contract identico a Qwen3-ASR**: Stage C è model-agnostic
 
 ---
 
-## 2bis. Costruzione dei turni — taglio per parola (2026-07-28)
+## 2bis. Segnali di affidabilità della diarizzazione (2026-07-28)
 
-**Cosa cambia**: i `speaker_turns` non si costruiscono più dall'etichetta di
-segmento, ma dal campo `speaker` della **singola parola** che
-`whisperx.assign_word_speakers` assegna già.
+**I turni si costruiscono per SEGMENTO** (voto di maggioranza di whisperx),
+come da sempre. Il taglio per **parola** è stato implementato, misurato e
+**ritirato**: vedi sotto.
 
-**Perché** — WhisperX sceglie lo speaker di un *segmento* per durata dominante
-(dal sorgente: *"sum intersection durations per speaker and pick the dominant
-one"*). Un segmento a cavallo di due parlanti collassa quindi sul maggioritario
-e **le parole dell'altro vengono assorbite**. Il codice precedente concatenava
-poi i segmenti consecutivi con la stessa etichetta, allungando ulteriormente il
-blocco.
+### Campi aggiuntivi nel contratto (additivi, nessuno rompe i consumatori)
 
-Effetto misurato sui dati Lifelog2 prima della correzione: turni da 37 s
-contenenti domanda e risposta di persone diverse, `n_segments_merged` fino a
-**79**, un turno da **299 s** (un intero segmento da 5 minuti in un turno solo),
-53% dei turni senza voiceprint utilizzabile perché l'embedding era una media di
-più voci.
-
-**Comportamento nuovo**
-
-| situazione | esito |
+| campo | contenuto |
 |---|---|
-| segmento a cavallo di due parlanti | **due turni distinti** |
-| stesso parlante su più segmenti consecutivi | **un turno solo** (invariato) |
-| parola senza `speaker` assegnato | ricade sullo speaker del segmento |
-| segmento senza allineamento a parole | resta un blocco unico (comportamento precedente) |
-| parola senza timestamp | eredita l'ultimo tempo noto, non viene persa |
+| `word_timestamps[].speaker` | speaker della singola parola, che `assign_word_speakers` calcola già e whisperx scartava |
+| `speaker_embeddings` | `{SPEAKER_XX: [256 float]}` — embedding per parlante calcolati da pyannote (`return_embeddings=True`) |
+| `diarization_stats` | statistiche sugli intervalli **grezzi** di pyannote, prima dell'incrocio con le parole |
 
-**Campi del contratto**: invariati nei nomi. Cambiano le *semantiche* di due:
+`diarization_stats` contiene: `n_intervals`, `n_speakers`, `dur_min`,
+`dur_median`, `dur_max`, `n_under_0s5`, `n_under_1s`, `short_flips`
+(alternanze A-B-A con B sotto il secondo).
 
-- `text` del turno è ora la concatenazione delle sue parole (prima era il testo
-  di segmento) — necessario, dato che un turno può coprire mezzo segmento
-- `n_segments_merged` conta i **segmenti sorgente distinti** da cui il turno
-  attinge (prima: quanti segmenti erano stati concatenati). Resta l'indicatore
-  di quanto materiale eterogeneo confluisce nel turno
+**A cosa servono**: non a ricostruire i turni, ma a permettere al consumatore
+(Stage C1) di **etichettare l'affidabilità** e non tentare estrazioni su
+materiale non attendibile.
 
-`avg_logprob`, `no_speech_prob` e `avg_compression_ratio` sono grandezze di
-segmento: si contano **una volta per segmento sorgente**, non una per parola.
+### Parametri opzionali della richiesta
 
-**Nota storica**: `backends/lifelog_asr` (qwen3-asr, porta 8087, in standby) ha
-lo stesso contratto ma **non** questa correzione. Se tornasse in servizio
-produrrebbe turni con la vecchia semantica.
+| campo | default | effetto |
+|---|---|---|
+| `min_speakers` / `max_speakers` | `None` | vincoli sul numero di parlanti |
+| `exclusive_diarization` | `False` | usa `exclusive_speaker_diarization` invece della standard |
 
+Entrambi lasciati al default: **misurati come peggiorativi** su audio
+ambientale (vedi sotto).
+
+### Cosa è stato provato e scartato
+
+Tutto misurato sullo stesso segmento reale (SNR 21 dB, tra i migliori
+disponibili), conversazione con 4-5 parlanti:
+
+| configurazione | intervalli | parlanti | <0.5s | alternanze brevi |
+|---|---|---|---|---|
+| **standard (in uso)** | 159 | 2 | 42 | 24 |
+| `min_speakers=3` | 185 | 3 | 71 | 38 |
+| `min_speakers=4` | 210 | 4 | 99 | 58 |
+| `min_speakers=5` | 207 | 5 | 92 | 46 |
+| `exclusive_diarization` | 180 | 2 | 72 | **78** |
+
+- **Vincolare i parlanti non separa meglio le voci**: taglia più fine lo stesso
+  audio e produce più frammenti spuri.
+- **La diarizzazione esclusiva peggiora**: elimina le sovrapposizioni tagliando,
+  e su audio dove accavallarsi è la norma triplica le alternanze spurie.
+- **Gli embedding per parlante sono inutilizzabili come voiceprint**: confrontati
+  con identità confermate presenti nella registrazione danno al massimo
+  **+0.038**, contro una soglia di riconoscimento a 0.50, con tutti gli altri
+  valori negativi. Sono impasti: 2 etichette per 4-5 persone reali.
+- **Il taglio per parola** è corretto in teoria ma su questo audio amplifica il
+  rumore: 30% dei turni finiva a 1-2 parole, con 20 alternanze A-B-A spurie.
+  Il voto di maggioranza per segmento è impreciso ma **filtra** quel rumore.
+
+Il warning `std(): degrees of freedom is <= 0` in
+`pyannote/audio/models/blocks/pooling.py` lo conferma dall'interno: lo
+statistics pooling gira su finestre da un frame solo.
+
+**Conclusione**: su audio ambientale con voci lontane e sovrapposte la
+diarizzazione ha un tetto, ora misurato. I segnali sopra servono a
+riconoscerlo, non a superarlo.
+
+---
 
 ## 2. Stack modelli
 

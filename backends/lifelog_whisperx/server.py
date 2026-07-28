@@ -321,23 +321,31 @@ def _to_contract(
     raw_logprobs:  list[float] = []
     raw_nospeechs: list[float] = []
 
-    # ── Word-level speaker boundaries (2026-07-28) ────────────────────────────
-    # Prima i turni si costruivano dallo speaker di SEGMENTO e si concatenavano
-    # i segmenti consecutivi con la stessa etichetta. Ma whisperx assegna lo
-    # speaker di un segmento per durata dominante ("sum intersection durations
-    # per speaker and pick the dominant one"): un segmento a cavallo di due
-    # parlanti collassa sul maggioritario e le parole dell'altro vengono
-    # ASSORBITE. Concatenando poi i segmenti, il "turno" diventava un blocco di
-    # tempo a etichetta dominante — misurati turni da 37s con dentro domanda e
-    # risposta di persone diverse, fino a 79 segmenti fusi, uno da 299s.
-    # assign_word_speakers assegna lo speaker anche a OGNI PAROLA: quel dato
-    # c'era già e veniva scartato. Ora i turni si tagliano dove cambia lo
-    # speaker della parola, attraversando i confini di segmento.
-    flat_words: list[dict] = []
-    for seg_idx, seg in enumerate(segments):
-        seg_spk = seg.get("speaker", "SPEAKER_00")
-        seg_s_ms = int(seg.get("start", 0) * 1000)
-        seg_e_ms = int(seg.get("end",   0) * 1000)
+    speaker_turns:          list[dict]        = []
+    turn_logprobs:          list[list[float]] = []
+    turn_nospeechs:         list[list[float]] = []
+    turn_word_counts:       list[int]         = []
+    turn_word_scores:       list[list[float]] = []
+    turn_compression_ratios: list[list[float]] = []
+
+    # ── Costruzione turni: per SEGMENTO (comportamento storico) ──────────────
+    # Il taglio per PAROLA (provato il 2026-07-28) e' tecnicamente corretto —
+    # assign_word_speakers assegna lo speaker a ogni parola e whisperx lo
+    # scarta — ma su questo audio AMPLIFICA il rumore invece di filtrarlo:
+    # pyannote produce 159 intervalli in 5 minuti con 42 sotto il mezzo secondo
+    # (minimo 0.02s), quindi tagliare a ogni cambio genera turni da una parola.
+    # Misurato: 30% dei turni a 1-2 parole, 20 alternanze A-B-A spurie.
+    # Il voto di maggioranza per segmento non e' preciso, ma FILTRA quel rumore.
+    # Provati e scartati, tutti peggiorativi (vedi lifelog2-aria-diarization-
+    # report): min_speakers 3/4/5, exclusive_speaker_diarization.
+    # I segnali nuovi (speaker per parola, embedding per parlante,
+    # diarization_stats) restano nel contratto: servono a Stage C1 per
+    # ETICHETTARE l'affidabilita', non per ricostruire i turni.
+    for seg in segments:
+        spk  = seg.get("speaker", "SPEAKER_00")
+        s_ms = int(seg.get("start", 0) * 1000)
+        e_ms = int(seg.get("end",   0) * 1000)
+        text = seg.get("text", "").strip()
 
         logprob = seg.get("avg_logprob")
         if logprob is None:
@@ -345,83 +353,35 @@ def _to_contract(
         nospeech = seg.get("no_speech_prob")
         if nospeech is None:
             nospeech = 0.1
+        compression_ratio = seg.get("compression_ratio", 1.0)
+
         raw_logprobs.append(logprob)
         raw_nospeechs.append(nospeech)
 
-        seg_meta = {
-            "seg_idx": seg_idx,
-            "logprob": logprob,
-            "nospeech": nospeech,
-            "compression_ratio": seg.get("compression_ratio", 1.0),
-        }
+        # word-level signals from wav2vec2 alignment
+        seg_words = seg.get("words", [])
+        seg_wc = len(seg_words)
+        seg_word_scores = [w["score"] for w in seg_words if w.get("score") is not None]
 
-        seg_words = seg.get("words") or []
-        if not seg_words:
-            # Segmento senza allineamento a parole: resta un blocco unico con
-            # lo speaker di segmento (comportamento precedente, come fallback).
-            flat_words.append({
-                "speaker": seg_spk, "start_ms": seg_s_ms, "end_ms": seg_e_ms,
-                "text": seg.get("text", "").strip(), "score": None, **seg_meta,
-            })
-            continue
-
-        # L'allineamento wav2vec2 può non produrre timestamp per alcune parole
-        # (numeri, simboli): si eredita l'ultimo tempo noto invece di scartarle.
-        last_ms = seg_s_ms
-        for w in seg_words:
-            w_start = w.get("start")
-            w_end   = w.get("end")
-            s_ms = int(w_start * 1000) if w_start is not None else last_ms
-            e_ms = int(w_end   * 1000) if w_end   is not None else s_ms
-            last_ms = e_ms
-            flat_words.append({
-                # se assign_word_speakers non ha assegnato la parola (nessuna
-                # sovrapposizione con un turno di diarizzazione), si ricade
-                # sullo speaker del segmento
-                "speaker": w.get("speaker") or seg_spk,
-                "start_ms": s_ms, "end_ms": e_ms,
-                "text": (w.get("word") or "").strip(),
-                "score": w.get("score"), **seg_meta,
-            })
-
-    # Raggruppa parole consecutive dello stesso parlante in un turno
-    speaker_turns:           list[dict]        = []
-    turn_logprobs:           list[list[float]] = []
-    turn_nospeechs:          list[list[float]] = []
-    turn_word_counts:        list[int]         = []
-    turn_word_scores:        list[list[float]] = []   # wav2vec2 alignment scores
-    turn_compression_ratios: list[list[float]] = []
-    turn_seg_idxs:           list[set]         = []   # segmenti sorgente distinti
-    turn_texts:              list[list[str]]   = []
-
-    for fw in flat_words:
-        new_turn = not speaker_turns or speaker_turns[-1]["speaker"] != fw["speaker"]
-        if new_turn:
-            speaker_turns.append({
-                "speaker": fw["speaker"], "start_ms": fw["start_ms"], "end_ms": fw["end_ms"], "text": "",
-            })
-            turn_logprobs.append([]); turn_nospeechs.append([]); turn_word_counts.append(0)
-            turn_word_scores.append([]); turn_compression_ratios.append([])
-            turn_seg_idxs.append(set()); turn_texts.append([])
-
-        speaker_turns[-1]["end_ms"] = max(speaker_turns[-1]["end_ms"], fw["end_ms"])
-        turn_word_counts[-1] += 1
-        if fw["text"]:
-            turn_texts[-1].append(fw["text"])
-        if fw["score"] is not None:
-            turn_word_scores[-1].append(fw["score"])
-        # logprob/no_speech/compression sono grandezze di SEGMENTO: si contano
-        # una volta per segmento sorgente, non una volta per parola
-        if fw["seg_idx"] not in turn_seg_idxs[-1]:
-            turn_seg_idxs[-1].add(fw["seg_idx"])
-            turn_logprobs[-1].append(fw["logprob"])
-            turn_nospeechs[-1].append(fw["nospeech"])
-            turn_compression_ratios[-1].append(fw["compression_ratio"])
+        if speaker_turns and speaker_turns[-1]["speaker"] == spk:
+            speaker_turns[-1]["end_ms"] = e_ms
+            speaker_turns[-1]["text"]   = (speaker_turns[-1]["text"] + " " + text).strip()
+            turn_logprobs[-1].append(logprob)
+            turn_nospeechs[-1].append(nospeech)
+            turn_word_counts[-1] += seg_wc
+            turn_word_scores[-1].extend(seg_word_scores)
+            turn_compression_ratios[-1].append(compression_ratio)
+        else:
+            speaker_turns.append({"speaker": spk, "start_ms": s_ms, "end_ms": e_ms, "text": text})
+            turn_logprobs.append([logprob])
+            turn_nospeechs.append([nospeech])
+            turn_word_counts.append(seg_wc)
+            turn_word_scores.append(list(seg_word_scores))
+            turn_compression_ratios.append([compression_ratio])
 
     # Per-turn quality metrics + individual voiceprint embedding
     waveform = torch.from_numpy(audio_np).unsqueeze(0)
     for i, turn in enumerate(speaker_turns):
-        turn["text"] = " ".join(turn_texts[i]).strip()
         lps  = turn_logprobs[i]  or [-0.5]
         nsps = turn_nospeechs[i] or [0.1]
         crs  = turn_compression_ratios[i] or [1.0]
@@ -434,9 +394,7 @@ def _to_contract(
         turn["avg_logprob"]            = lp
         turn["no_speech_prob"]         = nsp
         turn["word_count"]             = wc
-        # ora conta i segmenti SORGENTE distinti da cui il turno attinge:
-        # resta l'indicatore di quanto materiale eterogeneo confluisce nel turno
-        turn["n_segments_merged"]      = len(turn_seg_idxs[i])
+        turn["n_segments_merged"]      = len(turn_logprobs[i])
         turn["avg_word_score"]         = round(sum(scores) / len(scores), 4) if scores else None
         turn["avg_compression_ratio"]  = round(sum(crs) / len(crs), 4)
 
