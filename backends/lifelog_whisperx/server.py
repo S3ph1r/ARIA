@@ -247,10 +247,65 @@ def _vp_confidence(
     return round(0.40 * lp + 0.30 * dur + 0.20 * wc + 0.10 * ns, 3)
 
 
+def _log_diarization_stats(diarize_df, speaker_embeddings=None) -> dict:
+    """Diagnostica sull'output GREZZO di pyannote, prima dell'incrocio con le parole.
+
+    Serve a distinguere due cause possibili dello sfarfallio dei parlanti:
+      (a) pyannote produce intervalli brevi e spuri  → problema di diarizzazione
+      (b) pyannote è stabile ma i timestamp delle parole sono imprecisi ai bordi
+          → problema di riconciliazione (pyannote community-1 espone per questo
+             `exclusive_speaker_diarization`, che whisperx non usa)
+    """
+    try:
+        durs = [(float(r["end"]) - float(r["start"])) for _, r in diarize_df.iterrows()]
+        spks = [str(r["speaker"]) for _, r in diarize_df.iterrows()]
+    except Exception as exc:
+        logger.warning("Diarize stats non calcolabili: %s", exc)
+        return {}
+
+    n = len(durs)
+    if n == 0:
+        logger.warning("Diarize: nessun intervallo prodotto")
+        return {}
+
+    srt = sorted(durs)
+    # alternanze A-B-A dove B è molto breve: firma del rumore di diarizzazione
+    flips = sum(
+        1 for i in range(1, n - 1)
+        if spks[i - 1] == spks[i + 1] != spks[i] and durs[i] < 1.0
+    )
+    stats = {
+        "n_intervals":   n,
+        "n_speakers":    len(set(spks)),
+        "dur_min":       round(srt[0], 2),
+        "dur_median":    round(srt[n // 2], 2),
+        "dur_max":       round(srt[-1], 2),
+        "n_under_0s5":   sum(1 for d in durs if d < 0.5),
+        "n_under_1s":    sum(1 for d in durs if d < 1.0),
+        "short_flips":   flips,
+    }
+    logger.info(
+        "DIARIZE RAW: %d intervalli / %d parlanti | durata min=%.2fs mediana=%.2fs max=%.2fs "
+        "| <0.5s: %d, <1s: %d | alternanze brevi A-B-A: %d",
+        stats["n_intervals"], stats["n_speakers"], stats["dur_min"], stats["dur_median"],
+        stats["dur_max"], stats["n_under_0s5"], stats["n_under_1s"], stats["short_flips"],
+    )
+    if speaker_embeddings is not None:
+        try:
+            dims = {k: (len(v) if hasattr(v, "__len__") else "?") for k, v in speaker_embeddings.items()}
+            logger.info("DIARIZE EMBEDDINGS: %d parlanti, dimensioni %s", len(dims), dims)
+            stats["embedding_dims"] = dims
+        except Exception as exc:
+            logger.warning("Embeddings pyannote non ispezionabili: %s", exc)
+    return stats
+
+
 def _to_contract(
     wx_result: dict,
     audio_np: np.ndarray,   # float32 mono 16kHz
     language: str,
+    speaker_embeddings: dict | None = None,
+    diarize_stats: dict | None = None,
 ) -> dict:
     """Convert whisperx output to the Stage C contract.
 
@@ -427,7 +482,19 @@ def _to_contract(
     n_emb = sum(1 for t in speaker_turns if t.get("embedding") is not None)
     logger.info("_to_contract: %d turns, %d with embedding", len(speaker_turns), n_emb)
 
-    return {
+    # Embedding per PARLANTE calcolati da pyannote sui propri confini: più
+    # robusti del per-turno quando i turni sono brevi (2026-07-28, additivo).
+    # Le etichette (SPEAKER_00...) sono locali al segmento, come le altre.
+    speaker_embeddings_out: dict | None = None
+    if speaker_embeddings:
+        speaker_embeddings_out = {}
+        for spk, emb in speaker_embeddings.items():
+            try:
+                speaker_embeddings_out[str(spk)] = [round(float(x), 6) for x in emb]
+            except Exception:
+                continue
+
+    out = {
         "transcript":            " ".join(s.get("text", "") for s in segments).strip(),
         "language":              language,
         "duration_ms":           duration_ms,
@@ -435,6 +502,11 @@ def _to_contract(
         "word_timestamps":       word_timestamps,
         "transcription_quality": transcription_quality,
     }
+    if speaker_embeddings_out:
+        out["speaker_embeddings"] = speaker_embeddings_out
+    if diarize_stats:
+        out["diarization_stats"] = diarize_stats
+    return out
 
 
 @asynccontextmanager
@@ -569,12 +641,24 @@ def transcribe(req: TranscribeRequest):
         logger.info("Align done in %.1fs", time.perf_counter() - t_align)
 
         t_diar = time.perf_counter()
-        diarize_segs = _diarize_model(audio_np)
+        # return_embeddings: pyannote calcola già un embedding per PARLANTE sui
+        # propri confini (più robusto del nostro per-turno, che su turni brevi
+        # ha poco audio). Lo chiediamo per valutarne l'uso; se la versione di
+        # whisperx non lo supporta si ricade sul comportamento precedente.
+        speaker_embeddings = None
+        try:
+            diarize_segs, speaker_embeddings = _diarize_model(audio_np, return_embeddings=True)
+        except TypeError:
+            logger.info("Diarize: return_embeddings non supportato da questa versione di whisperx")
+            diarize_segs = _diarize_model(audio_np)
+        diarize_stats = _log_diarization_stats(diarize_segs, speaker_embeddings)
         wx_result = whisperx.assign_word_speakers(diarize_segs, wx_result)
         logger.info("Diarize done in %.1fs", time.perf_counter() - t_diar)
 
         t_vp = time.perf_counter()
-        output = _to_contract(wx_result, audio_np, detected_lang)
+        output = _to_contract(wx_result, audio_np, detected_lang,
+                              speaker_embeddings=speaker_embeddings,
+                              diarize_stats=diarize_stats)
         n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
         logger.info("Voiceprint done in %.1fs -- %d turns with embedding",
                     time.perf_counter() - t_vp, n_emb)
