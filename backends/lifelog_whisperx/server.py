@@ -539,6 +539,9 @@ class TranscribeRequest(BaseModel):
     # None = stima automatica di pyannote (comportamento storico).
     min_speakers: int | None = None
     max_speakers: int | None = None
+    # Usa la diarizzazione "esclusiva" (non sovrapposta) di pyannote
+    # community-1 invece di quella standard usata da whisperx.
+    exclusive_diarization: bool = False
 
 
 class VoiceprintRequest(BaseModel):
@@ -661,12 +664,38 @@ def transcribe(req: TranscribeRequest):
             diar_kw["max_speakers"] = req.max_speakers
         if diar_kw:
             logger.info("Diarize: vincoli sul numero di parlanti = %s", diar_kw)
-        try:
-            diarize_segs, speaker_embeddings = _diarize_model(
-                audio_np, return_embeddings=True, **diar_kw)
-        except TypeError:
-            logger.info("Diarize: return_embeddings non supportato da questa versione di whisperx")
-            diarize_segs = _diarize_model(audio_np, **diar_kw)
+        if req.exclusive_diarization:
+            # pyannote community-1 espone `exclusive_speaker_diarization`, una
+            # versione non sovrapposta pensata dagli autori proprio per
+            # "semplificare la riconciliazione tra i timestamp fini della
+            # diarizzazione e quelli (a volte non cosi' precisi) della
+            # trascrizione". whisperx usa solo output.speaker_diarization,
+            # quindi qui si chiama pyannote direttamente e si ricostruisce il
+            # DataFrame nello stesso formato che assign_word_speakers si aspetta.
+            import pandas as pd
+            audio_data = {
+                "waveform": torch.from_numpy(audio_np[None, :]),
+                "sample_rate": 16000,
+            }
+            pyannote_out = _diarize_model.model(audio_data, **diar_kw)
+            ann = getattr(pyannote_out, "exclusive_speaker_diarization", None)
+            if ann is None:
+                logger.warning("exclusive_speaker_diarization non disponibile — uso la standard")
+                ann = pyannote_out.speaker_diarization
+            else:
+                logger.info("Diarize: uso exclusive_speaker_diarization")
+            diarize_segs = pd.DataFrame(
+                ann.itertracks(yield_label=True), columns=["segment", "label", "speaker"]
+            )
+            diarize_segs["start"] = diarize_segs["segment"].apply(lambda x: x.start)
+            diarize_segs["end"]   = diarize_segs["segment"].apply(lambda x: x.end)
+        else:
+            try:
+                diarize_segs, speaker_embeddings = _diarize_model(
+                    audio_np, return_embeddings=True, **diar_kw)
+            except TypeError:
+                logger.info("Diarize: return_embeddings non supportato da questa versione di whisperx")
+                diarize_segs = _diarize_model(audio_np, **diar_kw)
         diarize_stats = _log_diarization_stats(diarize_segs, speaker_embeddings)
         wx_result = whisperx.assign_word_speakers(diarize_segs, wx_result)
         logger.info("Diarize done in %.1fs", time.perf_counter() - t_diar)
