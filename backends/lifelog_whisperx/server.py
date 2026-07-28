@@ -535,6 +535,10 @@ class TranscribeRequest(BaseModel):
     wav_url:    str
     segment_id: str
     language:   str = "it"
+    # Vincoli opzionali sul numero di parlanti per la diarizzazione.
+    # None = stima automatica di pyannote (comportamento storico).
+    min_speakers: int | None = None
+    max_speakers: int | None = None
 
 
 class VoiceprintRequest(BaseModel):
@@ -646,11 +650,23 @@ def transcribe(req: TranscribeRequest):
         # ha poco audio). Lo chiediamo per valutarne l'uso; se la versione di
         # whisperx non lo supporta si ricade sul comportamento precedente.
         speaker_embeddings = None
+        # min/max_speakers opzionali dal payload: pyannote stima da solo il
+        # numero di parlanti e sui nostri dati sbaglia per difetto (2 su 4-5
+        # reali), collassando voci diverse nello stesso cluster. Passabili per
+        # esperimento; None = comportamento automatico di prima.
+        diar_kw = {}
+        if req.min_speakers is not None:
+            diar_kw["min_speakers"] = req.min_speakers
+        if req.max_speakers is not None:
+            diar_kw["max_speakers"] = req.max_speakers
+        if diar_kw:
+            logger.info("Diarize: vincoli sul numero di parlanti = %s", diar_kw)
         try:
-            diarize_segs, speaker_embeddings = _diarize_model(audio_np, return_embeddings=True)
+            diarize_segs, speaker_embeddings = _diarize_model(
+                audio_np, return_embeddings=True, **diar_kw)
         except TypeError:
             logger.info("Diarize: return_embeddings non supportato da questa versione di whisperx")
-            diarize_segs = _diarize_model(audio_np)
+            diarize_segs = _diarize_model(audio_np, **diar_kw)
         diarize_stats = _log_diarization_stats(diarize_segs, speaker_embeddings)
         wx_result = whisperx.assign_word_speakers(diarize_segs, wx_result)
         logger.info("Diarize done in %.1fs", time.perf_counter() - t_diar)
