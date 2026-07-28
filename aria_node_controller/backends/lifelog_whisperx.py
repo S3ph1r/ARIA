@@ -67,6 +67,13 @@ class LifelogWhisperXBackend:
                 "segment_id": payload.get("segment_id", ""),
                 "language":   payload.get("language") or "it",
             }
+            # Vincoli opzionali sul numero di parlanti: il body veniva
+            # ricostruito con soli tre campi, quindi qualunque parametro di
+            # diarizzazione inviato dal client veniva scartato silenziosamente
+            # (scoperto il 2026-07-28: min_speakers non arrivava mai al backend).
+            for opt in ("min_speakers", "max_speakers"):
+                if payload.get(opt) is not None:
+                    body[opt] = payload[opt]
             r = requests.post(f"{server_url}/transcribe", json=body, timeout=600)
         r.raise_for_status()
         return r.json()
