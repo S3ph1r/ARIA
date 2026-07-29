@@ -536,3 +536,33 @@ passata ha recuperato 14 secondi di parlato che la prima aveva perso.
 Conseguenza pratica: **i risultati di un riprocessamento vanno giudicati
 statisticamente, non diffando due run**. Un turno che cambia fra due passate
 non è di per sé una regressione.
+
+### Correzione 2026-07-29 — il parlante della sequenza va portato esplicito
+
+Tolto il vincolo sulla fusione, il turno #5 del golden **continuava** a non
+separarsi: usciva `121.5→127.6 SPEAKER_01` con dentro sia la frase di Alex sia
+quella dell'utente.
+
+Causa: l'identità di una sequenza veniva riletta da `run[0]["speaker"]`, cioè
+dalla sua prima parola. Nel turno la sequenza si apre con un «Ma» di 0.16s
+dell'utente, troppo corto per fare turno e quindi assorbito in testa alla frase
+di Alex — che da quel momento *sembra* dell'utente. La ricucitura successiva
+vede due sequenze consecutive attribuite a SPEAKER_01 e le fonde, inghiottendo
+nel mezzo tutto ciò che aveva detto Alex.
+
+L'assorbimento in testa (`pending`) era stato introdotto per non far diventare
+un turno a sé i frammenti iniziali; il difetto è che cambiava anche l'identità
+di ciò a cui venivano attaccati.
+
+Correzione: `merged_runs` porta le coppie `(parlante, parole)`, col parlante
+fissato **prima** dell'assorbimento. Verificato sulle parole reali del turno:
+
+| | | |
+|---|---|---|
+| S02 | 121.52→124.66 | *Ma tutti nei contratti nuovi c'ha già quella cosa lì.* |
+| S01 | 125.16→127.60 | *Non so se è una questione d'età o...* |
+| S02 | 127.66→129.78 | *Eh, prima hai detto d'età, adesso hai detto un po'.* |
+
+Nota di metodo: le etichette per parola sono risultate **identiche** fra due
+riprocessamenti dello stesso m4a, mentre il testo no (647 vs 666 parole). La
+diarizzazione è stabile; la variabilità sta nell'ASR.

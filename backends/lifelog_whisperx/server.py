@@ -431,14 +431,23 @@ def _split_fused_turns(
 
         # Riassorbe le sequenze troppo corte nella precedente: sono le
         # alternanze spurie che avevano rovinato il tentativo del 28/07.
-        merged_runs: list[list[dict]] = []
+        #
+        # Il parlante di una sequenza va portato ESPLICITO, non riletto da
+        # run[0]: una sequenza corta assorbita in testa cambierebbe la prima
+        # parola e quindi l'identità apparente di tutta la sequenza. È il
+        # difetto che il 2026-07-29 teneva insieme tre battute di due persone
+        # nel segmento 0fc60ef2 — un solo "Ma" di 0.16s assorbito in testa alla
+        # frase di Alex la faceva sembrare dell'utente, e la ricucitura qui
+        # sotto la fondeva con la frase successiva dell'utente, inghiottendo
+        # nel mezzo tutto ciò che aveva detto Alex.
+        merged_runs: list[tuple[str, list[dict]]] = []   # (parlante, parole)
         pending: list[dict] = []                 # sequenze corte prima della prima valida
         for run in runs:
             dur_ms = int(run[-1].get("end", 0) * 1000) - int(run[0].get("start", 0) * 1000)
             too_short = dur_ms < SPLIT_MIN_RUN_MS or len(run) < SPLIT_MIN_RUN_WORDS
             if too_short:
                 if merged_runs:
-                    merged_runs[-1].extend(run)
+                    merged_runs[-1][1].extend(run)
                 else:
                     # Nessuna sequenza valida ancora: si accoda a quella che
                     # verrà. Prima diventava un turno a sé, ed è così che sul
@@ -446,27 +455,30 @@ def _split_fused_turns(
                     # — esattamente ciò che il filtro doveva impedire.
                     pending.extend(run)
             else:
+                parlante = run[0].get("speaker")
                 if pending:
                     run = pending + run
                     pending = []
-                merged_runs.append(run)
+                merged_runs.append((parlante, run))
         if pending:
             if merged_runs:
-                merged_runs[0] = pending + merged_runs[0]
+                merged_runs[0] = (merged_runs[0][0], pending + merged_runs[0][1])
             else:
-                merged_runs.append(pending)      # turno fatto di soli frammenti
+                # turno fatto di soli frammenti
+                merged_runs.append((pending[0].get("speaker"), pending))
 
         # Ricucitura: riassorbire una sequenza spuria lascia due tratti dello
         # STESSO parlante separati dal buco che si è appena chiuso. Senza questo
         # passaggio il taglio produrrebbe frammentazione al posto di ripararla —
         # è il modo in cui il tentativo del 28/07 si autosabotava.
-        coalesced: list[list[dict]] = []
-        for run in merged_runs:
-            if coalesced and coalesced[-1][0].get("speaker") == run[0].get("speaker"):
-                coalesced[-1].extend(run)
+        coalesced: list[tuple[str, list[dict]]] = []
+        for parlante, run in merged_runs:
+            if coalesced and coalesced[-1][0] == parlante:
+                coalesced[-1][1].extend(run)
             else:
-                coalesced.append(run)
-        merged_runs = coalesced
+                coalesced.append((parlante, run))
+        merged_runs = [(p, sorted(r, key=lambda w: w.get("start", 0)))
+                       for p, r in coalesced]
 
         if len(merged_runs) < 2:
             out_turns.append(turn)
@@ -476,7 +488,7 @@ def _split_fused_turns(
             continue
 
         n_split += 1
-        for run in merged_runs:
+        for parlante, run in merged_runs:
             scores = [w["score"] for w in run if w.get("score") is not None]
             s_ms = int(run[0].get("start", 0) * 1000)
             e_ms = int(run[-1].get("end", 0) * 1000)
@@ -489,7 +501,9 @@ def _split_fused_turns(
                 and int(sg.get("end", 0) * 1000) > s_ms
             )
             out_turns.append({
-                "speaker":  run[0].get("speaker") or turn["speaker"],
+                # il parlante DELLA SEQUENZA, non quello della prima parola:
+                # in testa può esserci un frammento assorbito di un altro
+                "speaker":  parlante or turn["speaker"],
                 "start_ms": s_ms,
                 "end_ms":   e_ms,
                 "text":     " ".join(w.get("word", "") for w in run).strip(),
