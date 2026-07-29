@@ -383,8 +383,34 @@ def _log_diarization_stats(diarize_df, speaker_embeddings=None) -> dict:
 # Serve ancora che almeno UNA delle due tenga: chi non ha né durata né parole
 # («come», «credere», «l'1%») resta un frammento e viene riassorbito, che è
 # esattamente ciò che il filtro deve continuare a fare.
-SPLIT_MIN_RUN_MS   = 1500   # abbastanza lunga da essere un turno anche se dice poco
-SPLIT_MIN_RUN_WORDS = 4     # oppure abbastanza parole da esserlo anche se è veloce
+#
+# 1500/4 → 700/2 (2026-07-29 sera). Misurato su quattro segmenti di contesti
+# acustici diversi, contando i turni che contengono parole di PIÙ parlanti —
+# il difetto vero, perché è lì che una voce finisce dentro il turno di un altro:
+#
+#   contesto              1500/4        1000/3        700/2
+#   documentario in TV    10 turni,1    10 turni,1    10 turni,1
+#   bar all'aperto 1      25 turni,9    31 turni,10   32 turni,9
+#   bar all'aperto 2      31 turni,14   33 turni,12   41 turni,8
+#   pub, botta e risposta 78 turni,21   89 turni,17   98 turni,11
+#
+# Il documentario NON CAMBIA a nessuna soglia: dove il parlato è pacato non
+# c'è niente da spezzare, quindi una maglia più fine non costa nulla. Dove è
+# concitato dimezza i turni misti. Per questo la soglia è unica e non adattiva
+# al contesto: l'adattività viene già dal contenuto.
+#
+# Il prezzo sono più turni brevi — al pub quelli sotto il secondo passano da 13
+# a 23 — ed è accettabile perché le due decisioni sono separate: un turno breve
+# serve comunque a dire CHI ha detto quella frase, mentre per l'IDENTITÀ non
+# conta, perché sotto il mezzo secondo di parlato utile _embed_intervals non
+# calcola nemmeno l'embedding e il turno arriva a valle come voce ignota.
+#
+# Limite noto: sotto i 700ms e con una parola sola la sequenza resta assorbita.
+# Nel campione del pub è il caso di «pericoli» (0.48s), un'interiezione dentro
+# la frase dell'altro. Recuperarla richiederebbe di promuovere ogni singola
+# parola, che è il tentativo fallito del 28/07.
+SPLIT_MIN_RUN_MS   = 700    # abbastanza lunga da essere un turno anche se dice poco
+SPLIT_MIN_RUN_WORDS = 2     # oppure abbastanza parole da esserlo anche se è veloce
 
 
 def _split_fused_turns(

@@ -607,3 +607,50 @@ La strada indicata per il consumatore (Lifelog2 Stage C1) non è spaccare quei
 turni ma **escluderli dall'identità**, come già si fa per i turni fusi: il loro
 embedding contiene due voci e non deve contribuire a nessun centroide. Il testo
 resta utilizzabile. Da tarare sulla distribuzione vera, non su un segmento.
+
+### Taratura 2026-07-29 — soglie a 700ms / 2 parole, uniche e non adattive
+
+Misurato su quattro segmenti scelti per contesto acustico diverso, contando i
+turni che contengono parole di **più parlanti** (il difetto vero: è lì che una
+voce finisce dentro il turno di un altro):
+
+| contesto | 1500/4 | 1000/3 | 700/2 |
+|---|---|---|---|
+| documentario in TV, salotto | 10 turni, 1 misto | 10, 1 | 10, 1 |
+| bar all'aperto 1 | 25, 9 | 31, 10 | 32, **9** |
+| bar all'aperto 2 | 31, 14 | 33, 12 | 41, **8** |
+| pub, botta e risposta serrato | 78, **21** | 89, 17 | 98, **11** |
+
+Il documentario **non cambia a nessuna soglia**: dove il parlato è pacato non
+c'è niente da spezzare, quindi la maglia più fine non costa nulla. Dove è
+concitato dimezza i turni misti.
+
+Da qui la scelta di **non** rendere le soglie adattive al contesto acustico,
+come si era ipotizzato: l'adattività viene già dal contenuto, e un parametro in
+meno è un parametro in meno da tarare.
+
+Il prezzo sono più turni brevi (al pub quelli sotto il secondo passano da 13 a
+23), accettabile perché le due decisioni restano separate:
+
+- **chi ha detto questa frase** → serve anche su un turno di mezzo secondo
+- **questa voce è utilizzabile per l'identità** → no, e infatti sotto 0.5s di
+  parlato utile `_embed_intervals` non calcola l'embedding: il turno arriva a
+  valle con il parlante giusto e senza voiceprint
+
+### Limite: le interiezioni brevissime restano assorbite
+
+Sotto 700ms **e** con una parola sola la sequenza viene riassorbita nel vicino.
+Nel campione del pub è il caso di «pericoli» (0.48s), un'interiezione dentro la
+frase dell'altro. Recuperarla richiederebbe di promuovere ogni singola parola,
+cioè il tentativo fallito del 28/07.
+
+### Nota: il volume non dice nulla sul contesto acustico
+
+Fra i quattro campioni, il pub concitato e il bar rumoroso hanno lo **stesso**
+`rms_db` (−19.0) pur essendo ambienti molto diversi, mentre il documentario sta
+a −42.4. Il livello misura quanto è vicina la sorgente al microfono, non
+quant'è affollato il posto — e in registrazione continua il guadagno automatico
+lo altera ancora. I segnali che discriminano davvero sono in
+`diarization_stats`: la frazione di intervalli sotto il mezzo secondo (29-35%
+nei due segmenti col brusio di fondo, 14-15% negli altri due) e il numero di
+parlanti rilevati (3 dove le persone erano 2).
