@@ -353,10 +353,24 @@ def _log_diarization_stats(diarize_df, speaker_embeddings=None) -> dict:
     return stats
 
 
-# Soglie del taglio mirato. Tarate sulla distribuzione misurata in Lifelog2 il
-# 2026-07-29 e volutamente conservative: meglio lasciare fuso un turno dubbio
-# che rifare la frammentazione del tentativo precedente.
-SPLIT_MIN_MERGED   = 9      # sotto questa fusione il turno non si tocca
+# Soglie del taglio mirato.
+#
+# SPLIT_MIN_MERGED era 9 (2026-07-29 mattina): il taglio guardava solo i turni
+# GRAVEMENTE fusi, per prudenza dopo la frammentazione del tentativo del 28/07.
+# Ritirato la sera stessa, misurando il segmento golden 0fc60ef2: il turno #5
+# fonde tre battute — Alex «Ma tutti nei contratti nuovi c'ha già quella cosa
+# lì», l'utente «Non so se è una questione d'età o...», Alex «Eh, prima hai
+# detto d'età, adesso hai detto un po'» — e ha n_segments_merged=2, quindi non
+# veniva nemmeno guardato. Lo speaker per parola le separava correttamente:
+# l'informazione c'era, la buttava via il voto di maggioranza per segmento.
+#
+# Il vincolo sulla fusione era il filtro sbagliato. Quelli giusti sono i due
+# sotto, che misurano la SOSTANZA del cambio di parlante invece della sua
+# posizione. Misurato sul golden togliendo il vincolo: 17 turni → 26, con i
+# tre pezzi del #5 separati giusti, la battuta «Dici se li avessi investiti?»
+# recuperata da dentro 53s di monologo, e nella discussione fitta finale solo
+# 6 sequenze su 18 promosse a turno — le altre riassorbite. Nessuna traccia
+# del 30% di turni da 1-2 parole che aveva affossato il tentativo del 28/07.
 SPLIT_MIN_RUN_MS   = 1500   # un cambio parlante più breve è rumore, non un turno
 SPLIT_MIN_RUN_WORDS = 4     # idem: sotto 4 parole non si apre un turno nuovo
 
@@ -392,14 +406,15 @@ def _split_fused_turns(
     n_split = 0
 
     for i, turn in enumerate(turns):
-        n_merged = len(logprobs[i])
         words = [
             w for w in word_segments
             if w.get("speaker") is not None
             and turn["start_ms"] <= int(w.get("start", 0) * 1000) < turn["end_ms"]
         ]
 
-        if n_merged < SPLIT_MIN_MERGED or len(words) < SPLIT_MIN_RUN_WORDS * 2:
+        # Serve solo abbastanza materiale perché possano esistere due sequenze
+        # valide: sotto, non c'è niente da tagliare comunque.
+        if len(words) < SPLIT_MIN_RUN_WORDS * 2:
             out_turns.append(turn)
             out_lp.append(logprobs[i]); out_ns.append(nospeechs[i])
             out_wc.append(word_counts[i]); out_ws.append(word_scores[i])
@@ -489,8 +504,8 @@ def _split_fused_turns(
 
     if n_split:
         logger.info(
-            "split turni fusi: %d turni oltre %d segmenti spezzati, %d → %d turni totali",
-            n_split, SPLIT_MIN_MERGED, len(turns), len(out_turns),
+            "split per cambio parlante: %d turni spezzati, %d → %d turni totali",
+            n_split, len(turns), len(out_turns),
         )
     return out_turns, out_lp, out_ns, out_wc, out_ws, out_cr
 
@@ -575,20 +590,24 @@ def _to_contract(
             turn_word_scores.append(list(seg_word_scores))
             turn_compression_ratios.append([compression_ratio])
 
-    # ── Taglio mirato dei turni fusi (2026-07-29) ────────────────────────────
-    # Misurato su 7900 turni reali in Lifelog2:
-    #   n_segments_merged=1  → 2694 turni, durata media   4.4s   (funzionano)
-    #   n_segments_merged>=9 →  965 turni, durata media 195.9s   (rotti)
-    # I secondi sono blocchi da tre minuti in cui pyannote ha detto "sempre lo
-    # stesso parlante" e la fusione ha inglobato gli interlocutori: l'embedding
-    # risultante è la media di più voci e fabbrica identità inesistenti.
+    # ── Taglio ai cambi di parlante sostenuti (2026-07-29) ───────────────────
+    # Il voto di maggioranza qui sopra decide UN parlante per segmento whisper,
+    # e quando in un segmento si alternano due voci la minoranza sparisce:
+    # sul segmento golden 0fc60ef2 una frase intera dell'utente veniva
+    # inghiottita in un turno di Alex, 19 parole contro 8. Lo speaker per
+    # parola le distingueva correttamente — l'informazione c'era già.
     #
-    # Il 2026-07-28 avevamo provato a costruire TUTTI i turni per parola: troppa
-    # frammentazione (30% dei turni ridotti a 1-2 parole, alternanze A-B-A
-    # spurie), e l'abbiamo annullato. L'idea non era sbagliata, lo era applicarla
-    # ovunque. Qui si taglia solo il 12% dei turni già degenerati, e solo dove il
-    # cambio di parlante **dura**: sotto MIN_RUN la sequenza viene riassorbita
-    # nel vicino, che è esattamente il rumore che ci aveva fregato.
+    # Il 2026-07-28 avevamo provato a costruire TUTTI i turni per parola:
+    # troppa frammentazione (30% dei turni a 1-2 parole, alternanze A-B-A
+    # spurie), annullato. Poi il taglio sui soli turni gravemente fusi
+    # (n_segments_merged >= 9), che però non guardava proprio i casi come
+    # quello sopra (quel turno ne aveva 2).
+    #
+    # Ora il taglio vale per tutti i turni, e a filtrare sono le SOGLIE DI
+    # SOSTANZA (SPLIT_MIN_RUN_MS / _WORDS): una sequenza che non dura o non ha
+    # parole viene riassorbita nel vicino invece di diventare un turno. È
+    # sempre stato quello il filtro giusto — il vincolo sulla fusione guardava
+    # la posizione del difetto invece della sua sostanza.
     #
     # Il taglio avviene prima del ciclo degli embedding, così ogni sotto-turno
     # riceve il proprio embedding sui confini nuovi invece di ereditare la media.

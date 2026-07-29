@@ -483,3 +483,56 @@ nell'audio stesso.
 - il taglio audio dei turni (dashboard `/segment/{id}/audio-clip`) userà
   `acoustic_*` quando presenti, con fallback sui confini whisper per lo
   storico non riprocessato
+
+### Aggiornamento 2026-07-29 sera — il vincolo sulla fusione è ritirato
+
+`SPLIT_MIN_MERGED = 9` guardava la **posizione** del difetto invece della sua
+**sostanza**, e per questo mancava i casi peggiori.
+
+Il caso che l'ha smontato è il turno #5 del segmento golden `0fc60ef2`, che
+fonde tre battute di due persone:
+
+| intervallo | speaker per parola | testo |
+|---|---|---|
+| 121.70–124.66 | S02 (Alex) | *Ma tutti nei contratti nuovi c'ha già quella cosa lì.* |
+| 125.16–127.60 | **S01 (utente)** | *Non so se è una questione d'età o...* |
+| 127.66–129.78 | S02 (Alex) | *Eh, prima hai detto d'età, adesso hai detto un po'.* |
+
+`n_segments_merged` = **2**, quindi il taglio non lo guardava nemmeno. Il voto
+di maggioranza per segmento assegnava tutto a SPEAKER_02 (19 parole contro 8) e
+la frase dell'utente spariva dentro un turno di Alex — con l'embedding
+corrispondente contaminato.
+
+Lo speaker per parola di `assign_word_speakers` le separava correttamente:
+l'informazione era già nel contratto, la buttava via il montaggio.
+
+**Ora il taglio vale per tutti i turni** e a filtrare restano le sole soglie di
+sostanza, che sono sempre state il filtro giusto:
+
+- `SPLIT_MIN_RUN_MS = 1500` — un cambio parlante più breve è rumore
+- `SPLIT_MIN_RUN_WORDS = 4` — idem sotto le 4 parole
+
+Misurato sul golden togliendo il vincolo, **17 turni → 26**:
+
+- il #5 si separa nei tre pezzi giusti; il frammento «Ma» (0.2s, 1 parola)
+  viene riassorbito
+- il #4 restituisce «Dici se li avessi investiti?» (1.7s, 5 parole), una
+  battuta di Alex sepolta dentro 53s di monologo dell'utente
+- nella discussione fitta di fine segmento solo **6 sequenze su 18** vengono
+  promosse a turno: le altre sono riassorbite, come devono
+
+Nessuna traccia del 30% di turni a 1-2 parole che aveva affossato il tentativo
+del 28/07: le guardie funzionavano già, mancava loro solo il permesso di
+intervenire.
+
+### Nota operativa: riprocessare non è idempotente
+
+Confrontando la trascrizione del 16/07 con quella del 29/07 **dello stesso
+m4a**: 647 parole contro 666, 3504 caratteri contro 3606. WhisperX segmenta con
+VAD e processa in batch; piccole differenze nel chunking spostano il contesto e
+il modello genera testo leggermente diverso. Nel caso specifico la seconda
+passata ha recuperato 14 secondi di parlato che la prima aveva perso.
+
+Conseguenza pratica: **i risultati di un riprocessamento vanno giudicati
+statisticamente, non diffando due run**. Un turno che cambia fra due passate
+non è di per sé una regressione.
