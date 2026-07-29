@@ -440,3 +440,46 @@ ricalcolate sulle parole del sotto-turno.
 
 I turni prodotti dal taglio portano `split_from_fused: true`, così il
 consumatore può distinguerli e misurarne l'effetto.
+
+## 11. Intervalli acustici per turno e embedding su confini pyannote (2026-07-29)
+
+### Il difetto misurato
+
+I confini dei turni sono la griglia **testuale** di whisper: l'allineatore
+(wav2vec2) incolla le parole all'audio ma non può uscire dalla finestra del
+segmento che whisper ha scelto, e ai cambi di parlante comprime le ultime
+parole dentro il confine. Misurato su un segmento reale (Lifelog2 `0fc60ef2`,
+profilo RMS): la trascrizione dichiara una pausa a 15.39–16.01, la forma
+d'onda la mostra a ~15.44–16.24; il vero cambio di parlante è a ~17.08, non a
+16.75. Due conseguenze:
+
+1. il taglio audio "dal turno X al turno Y" mozza le ultime parole (~0.3s)
+2. **l'embedding del turno successivo contiene la coda della voce precedente**
+   — su un turno da 2-3s è il 10-15% del campione
+
+Gli intervalli grezzi di pyannote non soffrono dello squeeze (lavorano
+sull'acustica, non sul testo) ma finivano buttati dopo
+`assign_word_speakers`.
+
+### Cosa cambia nel contratto
+
+Per ogni turno, quando pyannote ha intervalli per quella etichetta (campi
+additivi, assenti altrimenti):
+
+| campo | contenuto |
+|---|---|
+| `diar_intervals` | `[[start_ms, end_ms], …]` — gli intervalli acustici di QUESTO speaker che toccano il turno, con gli estremi di pyannote (tagliati solo oltre ±1s dalla finestra whisper, per non trascinare dentro turni A-B-A) |
+| `acoustic_start_ms` / `acoustic_end_ms` | inviluppo degli intervalli — i confini "veri" per il player |
+| `embedding_source` | `"diar"` = embedding calcolato sul concatenato degli intervalli; `"window"` = fallback sulla finestra whisper (nessun intervallo utilizzabile o < 0.5s di parlato) |
+
+L'embedding con `source="diar"` esclude dal campione il parlato dedicato degli
+altri parlanti; non può nulla contro il parlato sovrapposto, che è mescolato
+nell'audio stesso.
+
+### Consumatori
+
+- Lifelog2 Stage C1: salva i confini acustici per il player della vista
+  `/segments` e usa gli embedding più puliti per il raggruppamento
+- il taglio audio dei turni (dashboard `/segment/{id}/audio-clip`) userà
+  `acoustic_*` quando presenti, con fallback sui confini whisper per lo
+  storico non riprocessato

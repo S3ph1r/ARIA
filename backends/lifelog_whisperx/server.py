@@ -209,13 +209,37 @@ def _embed_turn(
     end_ms: int,
 ) -> list[float] | None:
     """256d ResNet293 embedding for a single speaker turn. Returns None if too short."""
+    return _embed_intervals(waveform, [(start_ms, end_ms)])
+
+
+def _embed_intervals(
+    waveform: torch.Tensor,          # (1, T) float32 at 16kHz
+    intervals: list[tuple[int, int]],  # [(start_ms, end_ms), ...]
+) -> list[float] | None:
+    """Embedding sul concatenato degli intervalli. None se il totale è < 0.5s.
+
+    Nato per calcolare il voiceprint sugli intervalli ACUSTICI di pyannote
+    invece che sulla finestra testuale di whisper (2026-07-29): i confini di
+    whisper sono schiacciati di ~0.3s ai cambi di parlante (l'allineatore
+    comprime le ultime parole dentro il segmento), quindi la finestra del turno
+    successivo contiene la coda della voce precedente. Su un turno da 2-3s è il
+    10-15% del campione — una delle cause della confusione dei turni brevi.
+    Concatenare solo gli intervalli in cui pyannote sente QUESTA voce toglie
+    dal campione il parlato dedicato degli altri.
+    """
     if _voiceprint_model is None:
         return None
     sr = 16000
-    s = int(start_ms / 1000 * sr)
-    e = int(end_ms   / 1000 * sr)
-    crop = waveform[:, s:e]
-    if crop.shape[1] < sr // 2:   # skip turns < 0.5 s
+    crops = []
+    for s_ms, e_ms in intervals:
+        s = max(0, int(s_ms / 1000 * sr))
+        e = min(waveform.shape[1], int(e_ms / 1000 * sr))
+        if e > s:
+            crops.append(waveform[:, s:e])
+    if not crops:
+        return None
+    crop = torch.cat(crops, dim=1)
+    if crop.shape[1] < sr // 2:   # skip < 0.5 s of usable speech
         return None
     dev = next(_voiceprint_model.parameters()).device
     crop = crop.to(dev)
@@ -224,8 +248,37 @@ def _embed_turn(
             emb = _voiceprint_model(crop.unsqueeze(0))  # (1, 256)
         return emb[0].cpu().tolist()
     except Exception as exc:
-        logger.warning("Voiceprint failed [%d–%d ms]: %s", start_ms, end_ms, exc)
+        logger.warning("Voiceprint failed on %d intervals: %s", len(intervals), exc)
         return None
+
+
+# Quanto un intervallo pyannote può sporgere oltre la finestra whisper del
+# turno prima di venire tagliato. Serve a due cose: tenere la sporgenza vera
+# (lo squeeze misurato è ~0.3-0.5s) e impedire che un intervallo lungo che
+# attraversa più turni A-B-A trascini dentro la finestra di un altro turno.
+_DIAR_MARGIN_MS = 1000
+
+
+def _turn_diar_intervals(
+    diar_by_spk: dict[str, list[tuple[int, int]]],
+    speaker: str,
+    start_ms: int,
+    end_ms: int,
+) -> list[list[int]]:
+    """Intervalli acustici pyannote di `speaker` che toccano [start_ms, end_ms].
+
+    Gli estremi restano quelli di pyannote (è il punto: sono i confini veri,
+    non quelli schiacciati di whisper), tagliati solo oltre _DIAR_MARGIN_MS
+    dalla finestra del turno.
+    """
+    lo = start_ms - _DIAR_MARGIN_MS
+    hi = end_ms + _DIAR_MARGIN_MS
+    out: list[list[int]] = []
+    for s, e in diar_by_spk.get(speaker, ()):
+        if e <= start_ms or s >= end_ms:      # nessuna sovrapposizione col turno
+            continue
+        out.append([max(s, lo), min(e, hi)])
+    return out
 
 
 def _vp_confidence(
@@ -448,6 +501,7 @@ def _to_contract(
     language: str,
     speaker_embeddings: dict | None = None,
     diarize_stats: dict | None = None,
+    diarize_df=None,        # DataFrame pyannote (start/end in secondi, speaker)
 ) -> dict:
     """Convert whisperx output to the Stage C contract.
 
@@ -545,6 +599,23 @@ def _to_contract(
             wx_result.get("word_segments", []), segments,
         )
 
+    # Intervalli acustici grezzi di pyannote, indicizzati per etichetta.
+    # Fin qui venivano buttati dopo assign_word_speakers: l'unica griglia
+    # temporale che sopravviveva era quella testuale di whisper, schiacciata
+    # ai cambi di parlante. Da oggi ogni turno porta anche i SUOI intervalli
+    # acustici (diar_intervals) e l'embedding è calcolato su quelli.
+    diar_by_spk: dict[str, list[tuple[int, int]]] = {}
+    if diarize_df is not None:
+        try:
+            for _, r in diarize_df.iterrows():
+                diar_by_spk.setdefault(str(r["speaker"]), []).append(
+                    (int(float(r["start"]) * 1000), int(float(r["end"]) * 1000)))
+            for v in diar_by_spk.values():
+                v.sort()
+        except Exception as exc:
+            logger.warning("Intervalli pyannote non indicizzabili: %s", exc)
+            diar_by_spk = {}
+
     # Per-turn quality metrics + individual voiceprint embedding
     waveform = torch.from_numpy(audio_np).unsqueeze(0)
     for i, turn in enumerate(speaker_turns):
@@ -564,11 +635,26 @@ def _to_contract(
         turn["avg_word_score"]         = round(sum(scores) / len(scores), 4) if scores else None
         turn["avg_compression_ratio"]  = round(sum(crs) / len(crs), 4)
 
-        emb = _embed_turn(waveform, turn["start_ms"], turn["end_ms"])
+        # Embedding: sugli intervalli acustici quando esistono, altrimenti
+        # sulla finestra whisper (fallback, ed embedding_source lo dichiara).
+        intervalli = _turn_diar_intervals(
+            diar_by_spk, turn["speaker"], turn["start_ms"], turn["end_ms"])
+        emb = None
+        if intervalli:
+            emb = _embed_intervals(waveform, [(s, e) for s, e in intervalli])
+        if emb is not None:
+            turn["embedding_source"] = "diar"
+        else:
+            emb = _embed_turn(waveform, turn["start_ms"], turn["end_ms"])
+            turn["embedding_source"] = "window" if emb is not None else None
         turn["embedding"]     = emb
         turn["vp_confidence"] = (
             _vp_confidence(lp, dur_s, wc, nsp) if emb is not None else 0.0
         )
+        if intervalli:
+            turn["diar_intervals"]    = intervalli
+            turn["acoustic_start_ms"] = intervalli[0][0]
+            turn["acoustic_end_ms"]   = max(e for _, e in intervalli)
 
     # word_timestamps: flat list with ms timestamps + wav2vec2 alignment score
     # + speaker per parola (2026-07-28): assign_word_speakers lo assegna già,
@@ -827,7 +913,8 @@ def transcribe(req: TranscribeRequest):
         t_vp = time.perf_counter()
         output = _to_contract(wx_result, audio_np, detected_lang,
                               speaker_embeddings=speaker_embeddings,
-                              diarize_stats=diarize_stats)
+                              diarize_stats=diarize_stats,
+                              diarize_df=diarize_segs)
         n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
         logger.info("Voiceprint done in %.1fs -- %d turns with embedding",
                     time.perf_counter() - t_vp, n_emb)
