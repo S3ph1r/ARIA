@@ -566,3 +566,44 @@ fissato **prima** dell'assorbimento. Verificato sulle parole reali del turno:
 Nota di metodo: le etichette per parola sono risultate **identiche** fra due
 riprocessamenti dello stesso m4a, mentre il testo no (647 vs 666 parole). La
 diarizzazione è stabile; la variabilità sta nell'ASR.
+
+### Correzione 2026-07-29 — le due soglie vanno in OR, non in AND
+
+Una sequenza diventava turno solo se durava **≥1.5s E** aveva **≥4 parole**.
+Pretendere entrambe scartava battute vere ma rapide — «Ci puoi mettere quello
+che vuoi» (0.8s, 5 parole), «Ah, ho capito cosa vuol dire» (1.2s, 7 parole) —
+che venivano riassorbite nel vicino portandosi dietro la voce di chi le aveva
+dette.
+
+Misurato sul golden `0fc60ef2`:
+
+| regola | turni | turni con dentro più voci | frammenti < 0.8s |
+|---|---|---|---|
+| 1500ms **E** 4 parole | 18 | **8** | 0 |
+| 1500ms **O** 4 parole | 25 | **3** | 1 |
+
+Serve ancora che almeno una delle due tenga: chi non ha né durata né parole
+(«come», «credere», «l'1%») resta frammento e viene riassorbito.
+
+### Limite noto: le interruzioni sovrapposte non sono separabili
+
+Il turno #1 dello stesso segmento contiene tre battute — Alex «Gli UFR guarda
+che adesso te lo davano a te», utente «Mi fai finire il ragionamento?», Alex
+«Stai parlando dell'Inps?» — e **nessuna soglia lo può separare**: negli
+intervalli grezzi pyannote non ha alcuna attività dell'altro parlante fra
+18.36 e 26.12, tutte e 17 le parole sono di SPEAKER_02. L'informazione non è
+stata persa dal montaggio: non è mai esistita.
+
+È parlato sovrapposto — l'utente parla *sopra* Alex — e la diarizzazione
+standard non lo separa (`exclusive_speaker_diarization` è stato provato e dà
+risultati peggiori, vedi §2bis).
+
+Esiste però una **firma misurabile**: l'allineamento wav2vec2 collassa nelle
+zone di sovrapposizione. Il turno #1 ha `avg_word_score` **0.4693** contro
+0.65–0.74 dei turni puliti, e una singola parola («dell'Inps?») occupa 2.78s.
+Sul golden i turni sotto 0.45 sono 3, tutti in zone di accavallamento.
+
+La strada indicata per il consumatore (Lifelog2 Stage C1) non è spaccare quei
+turni ma **escluderli dall'identità**, come già si fa per i turni fusi: il loro
+embedding contiene due voci e non deve contribuire a nessun centroide. Il testo
+resta utilizzabile. Da tarare sulla distribuzione vera, non su un segmento.

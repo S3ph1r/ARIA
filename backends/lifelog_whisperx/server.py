@@ -371,8 +371,20 @@ def _log_diarization_stats(diarize_df, speaker_embeddings=None) -> dict:
 # recuperata da dentro 53s di monologo, e nella discussione fitta finale solo
 # 6 sequenze su 18 promosse a turno — le altre riassorbite. Nessuna traccia
 # del 30% di turni da 1-2 parole che aveva affossato il tentativo del 28/07.
-SPLIT_MIN_RUN_MS   = 1500   # un cambio parlante più breve è rumore, non un turno
-SPLIT_MIN_RUN_WORDS = 4     # idem: sotto 4 parole non si apre un turno nuovo
+# Le due soglie sono in OR, non in AND (corretto 2026-07-29 sera): una battuta
+# vera può essere breve — «Ci puoi mettere quello che vuoi» dura 0.8s ma sono 5
+# parole, «Ah, ho capito cosa vuol dire» 1.2s e 7 parole. Pretendendo entrambe
+# le condizioni venivano riassorbite, e con loro finiva nel turno del vicino
+# anche la voce di chi le aveva dette. Misurato sul golden 0fc60ef2:
+#
+#   1500ms E 4 parole → 18 turni, 8 con dentro più voci
+#   1500ms O 4 parole → 25 turni, 3 con dentro più voci
+#
+# Serve ancora che almeno UNA delle due tenga: chi non ha né durata né parole
+# («come», «credere», «l'1%») resta un frammento e viene riassorbito, che è
+# esattamente ciò che il filtro deve continuare a fare.
+SPLIT_MIN_RUN_MS   = 1500   # abbastanza lunga da essere un turno anche se dice poco
+SPLIT_MIN_RUN_WORDS = 4     # oppure abbastanza parole da esserlo anche se è veloce
 
 
 def _split_fused_turns(
@@ -444,7 +456,8 @@ def _split_fused_turns(
         pending: list[dict] = []                 # sequenze corte prima della prima valida
         for run in runs:
             dur_ms = int(run[-1].get("end", 0) * 1000) - int(run[0].get("start", 0) * 1000)
-            too_short = dur_ms < SPLIT_MIN_RUN_MS or len(run) < SPLIT_MIN_RUN_WORDS
+            # frammento solo se non regge NÉ per durata NÉ per parole
+            too_short = dur_ms < SPLIT_MIN_RUN_MS and len(run) < SPLIT_MIN_RUN_WORDS
             if too_short:
                 if merged_runs:
                     merged_runs[-1][1].extend(run)
