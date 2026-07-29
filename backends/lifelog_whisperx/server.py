@@ -364,15 +364,29 @@ def _split_fused_turns(
         # Riassorbe le sequenze troppo corte nella precedente: sono le
         # alternanze spurie che avevano rovinato il tentativo del 28/07.
         merged_runs: list[list[dict]] = []
+        pending: list[dict] = []                 # sequenze corte prima della prima valida
         for run in runs:
             dur_ms = int(run[-1].get("end", 0) * 1000) - int(run[0].get("start", 0) * 1000)
             too_short = dur_ms < SPLIT_MIN_RUN_MS or len(run) < SPLIT_MIN_RUN_WORDS
-            if too_short and merged_runs:
-                merged_runs[-1].extend(run)
-            elif too_short and not merged_runs:
-                merged_runs.append(run)          # la prima non ha dove confluire
+            if too_short:
+                if merged_runs:
+                    merged_runs[-1].extend(run)
+                else:
+                    # Nessuna sequenza valida ancora: si accoda a quella che
+                    # verrà. Prima diventava un turno a sé, ed è così che sul
+                    # segmento 06586ffb è uscito un frammento da 0.9s e 4 parole
+                    # — esattamente ciò che il filtro doveva impedire.
+                    pending.extend(run)
             else:
+                if pending:
+                    run = pending + run
+                    pending = []
                 merged_runs.append(run)
+        if pending:
+            if merged_runs:
+                merged_runs[0] = pending + merged_runs[0]
+            else:
+                merged_runs.append(pending)      # turno fatto di soli frammenti
 
         # Ricucitura: riassorbire una sequenza spuria lascia due tratti dello
         # STESSO parlante separati dal buco che si è appena chiuso. Senza questo
