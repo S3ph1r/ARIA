@@ -654,3 +654,52 @@ lo altera ancora. I segnali che discriminano davvero sono in
 `diarization_stats`: la frazione di intervalli sotto il mezzo secondo (29-35%
 nei due segmenti col brusio di fondo, 14-15% negli altri due) e il numero di
 parlanti rilevati (3 dove le persone erano 2).
+
+## 12. `usable_audio_ms` e `speaker_purity` (2026-07-29)
+
+Due misure per turno, additive, che rispondono a **«posso fidarmi di CHI ha
+parlato?»** — separatamente dalla qualità del testo. Servono al consumatore per
+dare una voce **generica** invece di un'identità specifica quando non c'è
+materiale per deciderla.
+
+| campo | contenuto |
+|---|---|
+| `usable_audio_ms` | somma delle durate di `diar_intervals`: quanto parlato di questa voce è entrato davvero nell'embedding |
+| `speaker_purity` | frazione della durata delle parole del turno il cui parlante per-parola coincide con quello del turno; `null` se il turno non ha parole allineate |
+
+### Perché `usable_audio_ms` non è la durata del turno
+
+Gli intervalli acustici possono sporgere oltre la finestra testuale (fino a
+±1s, vedi `_DIAR_MARGIN_MS`), quindi un turno da 0.36s può avere **1.4s** di
+audio utile. Per l'identità è un vantaggio — più voce, embedding più stabile —
+ma va dichiarato, perché testo ed embedding coprono finestre diverse. Misurato
+sul campione del pub: dei 23 turni sotto il secondo, **12 hanno più del doppio
+di audio acustico** rispetto alla loro durata testuale.
+
+### Perché serve `speaker_purity`
+
+Nei botta e risposta serrati l'assegnazione del parlante **per parola** sbaglia
+sui confini. Esempio dal campione del pub:
+
+```
+...tutti[01] i[01] pericoli[00] hai[01] presente[01] hollow[01] knight[00] eh[00]...
+```
+
+`pericoli` (interiezione dell'altro dentro la frase) e `knight` (parola della
+frase attribuita all'altro) sono errori per-parola. Il taglio non li corregge:
+li isola in turni separati con l'attribuzione sbagliata. `speaker_purity` li
+rende visibili invece di lasciarli passare per certi — nel campione 11 turni su
+98 sono impuri, il peggiore a **0.37**.
+
+### Nota metodologica: il taglio fine misurato bene
+
+Contare i «turni misti» premia il taglio fine per il motivo sbagliato: un errore
+per-parola che diventa un turno a sé smette di contare come misto. La misura
+onesta è **quanta durata di testo finisce sulla voce sbagliata**:
+
+| campione del pub | turni | testo attribuito male |
+|---|---|---|
+| 1500ms / 4 parole | 78 | 11.6s su 201s — **5.8%** |
+| 700ms / 2 parole | 98 | 2.4s su 201s — **1.2%** |
+
+Cinque volte meglio: il taglio fine isola gli errori invece di moltiplicarli.

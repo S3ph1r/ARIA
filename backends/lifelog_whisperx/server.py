@@ -728,6 +728,38 @@ def _to_contract(
             turn["acoustic_start_ms"] = intervalli[0][0]
             turn["acoustic_end_ms"]   = max(e for _, e in intervalli)
 
+        # ── Due misure per il consumatore: «posso fidarmi di CHI ha parlato?» ──
+        #
+        # Sono separate dalla qualità del testo, e servono a non farsi ingannare
+        # sulla provenienza (Lifelog2 le usa per dare una voce GENERICA invece di
+        # un'identità specifica quando non c'è materiale per deciderla).
+        #
+        # usable_audio_ms: quanto parlato di QUESTA voce è entrato davvero
+        #   nell'embedding. Non coincide con la durata del turno: gli intervalli
+        #   acustici possono sporgere oltre la finestra testuale, quindi un turno
+        #   da 0.36s può avere 1.4s di audio utile — meglio così per l'identità,
+        #   ma va dichiarato perché testo ed embedding coprono finestre diverse.
+        #
+        # speaker_purity: frazione della durata delle parole del turno il cui
+        #   parlante per-parola coincide con quello del turno. Sotto 1.0 il turno
+        #   contiene parole di qualcun altro — accade nei botta e risposta serrati,
+        #   dove l'assegnazione per parola sbaglia sui confini. Misurato: nel
+        #   campione del pub 11 turni su 98 sono impuri, il peggiore a 0.37.
+        turn["usable_audio_ms"] = sum(e - s for s, e in intervalli) if intervalli else 0
+        parole_turno = [
+            w for w in wx_result.get("word_segments", [])
+            if w.get("speaker") is not None
+            and turn["start_ms"] <= int(w.get("start", 0) * 1000) < turn["end_ms"]
+        ]
+        if parole_turno:
+            tot_ms = sum(int((w.get("end", 0) - w.get("start", 0)) * 1000)
+                         for w in parole_turno) or 1
+            ok_ms = sum(int((w.get("end", 0) - w.get("start", 0)) * 1000)
+                        for w in parole_turno if w.get("speaker") == turn["speaker"])
+            turn["speaker_purity"] = round(ok_ms / tot_ms, 3)
+        else:
+            turn["speaker_purity"] = None
+
     # word_timestamps: flat list with ms timestamps + wav2vec2 alignment score
     # + speaker per parola (2026-07-28): assign_word_speakers lo assegna già,
     # prima veniva scartato qui. Permette al consumatore di ri-verificare o
