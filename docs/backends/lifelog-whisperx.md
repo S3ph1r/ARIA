@@ -12,7 +12,7 @@
 
 Lifelog WhisperX è il backend di trascrizione audio di ARIA basato su WhisperX large-v3.
 Sostituisce Qwen3-ASR-1.7B come backend primario di Lifelog2, aggiungendo voiceprint 256d
-integrati (pyannote wespeaker-resnet34-LM) e diarizzazione nativa.
+integrati (WeSpeaker ResNet293) e diarizzazione nativa.
 
 ### Funzionalità principali
 
@@ -21,7 +21,7 @@ integrati (pyannote wespeaker-resnet34-LM) e diarizzazione nativa.
 - **Diarizzazione speaker**: pyannote community-1 — chi parla, quando
 - **Segnali di affidabilità della diarizzazione** (dal 2026-07-28): speaker per parola,
   embedding per parlante, statistiche sugli intervalli grezzi di pyannote — vedi §2bis
-- **Voiceprint embedding**: wespeaker-resnet34-LM, vettore 256d per speaker, pooling su max 30s
+- **Voiceprint embedding**: WeSpeaker ResNet293 (`Wespeaker/wespeaker-voxceleb-resnet293-LM`), vettore 256d per speaker, pooling su max 30s
 - **Output contract identico a Qwen3-ASR**: Stage C è model-agnostic
 
 ---
@@ -121,8 +121,8 @@ WAV input (16kHz mono, ~5 min)
               │ turn boundaries
               ▼
 ┌──────────────────────────────────┐
-│  wespeaker-resnet34-LM           │  ← estrazione voiceprint pooling
-│  (pyannote Inference, window=whole)│   output: vettore 256d
+│  wespeaker-resnet293-LM          │  ← estrazione voiceprint pooling
+│  (WeSpeakerResNet293, window=whole)│   output: vettore 256d
 │  ~0.5 GB VRAM                   │
 └─────────────┬────────────────────┘
               │
@@ -287,7 +287,7 @@ POST /transcribe
 | Python | 3.12 | |
 | PyTorch | 2.8.0+cu128 | sm_120 (Blackwell) — versione richiesta da whisperx |
 | `whisperx` | 3.8.5 | WhisperX large-v3 + wav2vec2 align |
-| `pyannote.audio` | 3.x | speaker-diarization-community-1 + wespeaker-resnet34-LM |
+| `pyannote.audio` | 3.x | speaker-diarization-community-1 + wespeaker-resnet293-LM |
 | `soundfile` | latest | Bypass ffmpeg DLL crash |
 | `resampy` | latest | Resampling audio se SR ≠ 16kHz |
 
@@ -321,7 +321,7 @@ Tutti i pesi in HF cache (`~/.cache/huggingface/`) — scaricati automaticamente
 | `openai/whisper-large-v3` | ~3 GB |
 | `jonatasgrosman/wav2vec2-large-xlsr-53-italian` (align ITA) | ~1.3 GB |
 | `pyannote/speaker-diarization-community-1` | ~2 GB |
-| `pyannote/wespeaker-voxceleb-resnet34-LM` | ~0.5 GB |
+| `Wespeaker/wespeaker-voxceleb-resnet293-LM` | ~0.5 GB |
 
 ---
 
@@ -703,3 +703,62 @@ onesta è **quanta durata di testo finisce sulla voce sbagliata**:
 | 700ms / 2 parole | 98 | 2.4s su 201s — **1.2%** |
 
 Cinque volte meglio: il taglio fine isola gli errori invece di moltiplicarli.
+
+## 13. Fix crash su audio senza voce rilevata + pulizia log (2026-07-30)
+
+### Il bug
+
+Durante il riprocessamento cronologico dello storico Lifelog2, `/transcribe`
+falliva con 500 in modo deterministico e ripetuto (mai transitorio) su
+segmenti di audio genuinamente silenzioso. Causa: quando pyannote VAD non
+trova voce, la diarizzazione produce comunque un intervallo fittizio per un
+"parlante" fantasma — e il suo pooling statistico interno (bug noto e non
+risolto upstream, [pyannote-audio#1861](https://github.com/pyannote/pyannote-audio/issues/1861):
+`std()` con correzione di Bessel su una finestra di un solo frame) può
+restituire un embedding con componenti NaN. `_to_contract` lo includeva così
+com'era in `speaker_embeddings`, e la serializzazione JSON della risposta
+falliva (`ValueError: Out of range float values are not JSON compliant`).
+
+Lato Lifelog2 Stage C, ogni retry falliva allo stesso modo (non è un guasto
+transitorio, è deterministico sullo stesso file) finché il messaggio non
+raggiungeva il tetto di consegne del consumer group ed veniva scartato —
+qualche minuto sprecato per ogni segmento silenzioso, e il segmento finiva
+segnato come "errore infrastrutturale" invece che "0 turni, ok".
+
+### Il fix
+
+`_to_contract` ora scarta (con un log INFO che spiega perché) qualunque
+embedding con componenti non finiti prima di includerlo nella risposta — il
+segmento torna con turni vuoti invece di rompere la risposta. **Non** è stato
+patchato il pooling di pyannote alla radice: non è stato possibile verificare
+la firma esatta della funzione installata sull'ambiente di produzione da
+remoto, e patchare codice di terzi senza poterlo verificare end-to-end è un
+rischio che non valeva il beneficio (bastava il filtro difensivo).
+
+### Pulizia log
+
+- Silenziati tre avvisi confermati innocui e verificati uno per uno: warning
+  torchcodec all'import (mai usato — l'audio passa sempre da `soundfile`, non
+  dall'I/O di pyannote/torchaudio), TF32 disabilitato (scelta deliberata di
+  pyannote per riproducibilità), upgrade automatico del checkpoint Lightning
+  (adeguamento di formato, nessun impatto).
+- **Lasciato visibile** di proposito `std(): degrees of freedom is <= 0` — è
+  il sintomo del bug sopra, resta un segnale diagnostico legittimo (già usato
+  in §2bis per misurare la qualità della diarizzazione).
+- Login HF fallito in modalità offline: riclassificato da WARNING a INFO con
+  messaggio esplicito — è atteso, non un problema.
+- Un riepilogo in italiano di tutti gli avvisi silenziati viene loggato una
+  volta ad ogni avvio, in modo da non dover ricontrollare o richiedere ogni
+  volta cosa significano.
+- Rimosso `WESPEAKER_PATH`, una costante morta che puntava ancora al vecchio
+  path resnet34 mai referenziato altrove; allineati ai riferimenti
+  resnet293 anche i paragrafi 1/2/6/7 di questo documento, rimasti indietro
+  rispetto all'upgrade del modello già in produzione.
+
+### Controllo aggiornamenti modelli (manuale, non automatico)
+
+Aggiunto `backends/lifelog_whisperx/check_model_updates.py`: interroga HF Hub
+per la revisione più recente di ciascun modello pinnato e la confronta con
+quella in cache locale, senza scaricare nulla. Da lanciare a mano, di tanto in
+tanto — non è collegato all'avvio del backend né a nessuno scheduler, per non
+introdurre variabilità in un setup che oggi funziona.

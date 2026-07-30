@@ -31,9 +31,11 @@ os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 # Local model paths
 WHISPER_MODEL_PATH = os.path.join(MODELS_DIR, "faster-whisper-large-v3")
-WESPEAKER_PATH     = os.path.join(MODELS_DIR, "pyannote", "wespeaker-voxceleb-resnet34-LM")
 ALIGN_CACHE_DIR    = os.path.join(MODELS_DIR, "whisperx-align")
 DIARIZE_MODEL_PATH = os.path.join(MODELS_DIR, "pyannote", "speaker-diarization-community-1")
+# Il path del voiceprint (resnet293) è calcolato più sotto in WESPEAKER_LOCAL —
+# rimosso 2026-07-30 un WESPEAKER_PATH morto che puntava ancora al vecchio
+# resnet34, mai usato da _load_wespeaker_resnet293.
 
 # Add conda Library/bin to PATH so whisperx finds ffmpeg.exe (conda-forge puts it there)
 _env_root = os.path.dirname(sys.executable)
@@ -50,6 +52,37 @@ def _patched_cap(device=None):
 torch.cuda.get_device_capability = _patched_cap
 # ---
 
+# --- WARNING NOTI E INNOCUI — silenziati qui, PRIMA di importare pyannote,
+# perché sono avvisi emessi all'IMPORT del modulo (torchcodec) o durante
+# l'inferenza (TF32, Lightning). Verificati uno per uno (2026-07-30):
+#
+# 1. torchcodec: pyannote.audio lo controlla sempre all'import, ma questo
+#    server non usa MAI l'I/O di pyannote/torchaudio per decodificare audio —
+#    i WAV arrivano già come array da soundfile (bypass deliberato, vedi Fix 3
+#    in docs/backends/lifelog-whisperx.md). L'avviso non ha alcun effetto qui.
+# 2. TF32 disabilitato: scelta DELIBERATA di pyannote per riproducibilità,
+#    non un errore né un problema di configurazione nostro.
+# 3. "Lightning automatically upgraded your loaded checkpoint": adeguamento
+#    automatico e innocuo del formato del checkpoint, nessun impatto sui
+#    risultati.
+#
+# NON silenziato di proposito: "std(): degrees of freedom is <= 0" — è il
+# sintomo di un bug noto e non risolto upstream in pyannote-audio (issue
+# github.com/pyannote/pyannote-audio/issues/1861: il pooling statistico
+# calcola una deviazione standard con correzione di Bessel su una finestra
+# di un solo frame, producendo NaN). Qui si manifesta quando pyannote
+# diarizza un audio senza voce rilevata. Il crash che ne conseguiva è
+# corretto scartando l'embedding non valido invece di propagarlo (vedi
+# _to_contract, sezione "embeddings per parlante") — ma il warning stesso
+# resta visibile perché è un segnale diagnostico legittimo, già usato in
+# docs/backends/lifelog-whisperx.md §2bis per misurare la qualità della
+# diarizzazione.
+import warnings
+warnings.filterwarnings("ignore", message=".*torchcodec.*")
+warnings.filterwarnings("ignore", message=".*TensorFloat-32.*")
+warnings.filterwarnings("ignore", message=".*automatically upgraded your loaded checkpoint.*")
+# ---
+
 import torchaudio
 from types import ModuleType
 
@@ -63,6 +96,7 @@ if not hasattr(torchaudio, "io"):
     sys.modules["torchaudio.io"] = _io
 
 import gc
+import math
 import time
 import tempfile
 import numpy as np
@@ -87,7 +121,12 @@ if hf_token:
     try:
         login(token=hf_token)
     except Exception as e:
-        logging.warning("HF Login failed: %s", e)
+        # Atteso quando HF_HUB_OFFLINE è attivo (iniettato dall'orchestratore) e
+        # i modelli sono già in cache locale: non serve raggiungere HF per
+        # partire. INFO, non WARNING — non è un problema da controllare.
+        logging.info(
+            "Login HF non effettuato (modalità offline, modelli già in cache locale): %s", e
+        )
 
 LOG_FILE = r"C:\Users\Roberto\aria\logs\lifelog_whisperx.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -191,6 +230,17 @@ def _load_models():
     except Exception as e:
         logger.warning("Voiceprint encoder unavailable: %s -- voiceprints will be empty", e)
         _voiceprint_model = None
+
+    logger.info(
+        "Tutti i modelli caricati. Promemoria avvisi innocui silenziati in questo avvio "
+        "(verificati il 2026-07-30, non richiedono attenzione): "
+        "'torchcodec non installato correttamente' — mai usato, l'audio arriva già "
+        "come array da soundfile; 'TensorFloat-32 disabilitato' — scelta di pyannote "
+        "per riproducibilità; 'checkpoint aggiornato automaticamente' — adeguamento "
+        "di formato, nessun impatto. Resta invece visibile 'std(): degrees of freedom' "
+        "perché segnala diarizzazione su audio poco affidabile — vedi "
+        "docs/backends/lifelog-whisperx.md §2bis."
+    )
 
 
 def _unload_models():
@@ -799,14 +849,34 @@ def _to_contract(
     # Embedding per PARLANTE calcolati da pyannote sui propri confini: più
     # robusti del per-turno quando i turni sono brevi (2026-07-28, additivo).
     # Le etichette (SPEAKER_00...) sono locali al segmento, come le altre.
+    #
+    # Guardia NaN (2026-07-30): su audio senza voce rilevata, pyannote produce
+    # comunque un intervallo fittizio per un "parlante" fantasma, e il suo
+    # pooling statistico interno (bug noto e non risolto upstream, pyannote-
+    # audio issue #1861 — std() con correzione di Bessel su una finestra di un
+    # solo frame) può restituire un embedding con componenti NaN/Inf. Prima
+    # veniva incluso così com'era e rompeva la serializzazione JSON della
+    # risposta (ValueError: Out of range float values are not JSON compliant),
+    # facendo fallire l'intera trascrizione con un 500 anche quando testo e
+    # turni erano perfettamente vuoti/corretti. Ora lo scartiamo: il segmento
+    # risulterà semplicemente senza embedding per quel parlante.
     speaker_embeddings_out: dict | None = None
     if speaker_embeddings:
         speaker_embeddings_out = {}
         for spk, emb in speaker_embeddings.items():
             try:
-                speaker_embeddings_out[str(spk)] = [round(float(x), 6) for x in emb]
+                vals = [round(float(x), 6) for x in emb]
             except Exception:
                 continue
+            if not all(math.isfinite(v) for v in vals):
+                logger.info(
+                    "Embedding parlante %s scartato (valori non validi, NaN/Inf) — "
+                    "normale su audio senza voce rilevata, non influisce sulla "
+                    "trascrizione: il parlante resterà semplicemente senza voiceprint.",
+                    spk,
+                )
+                continue
+            speaker_embeddings_out[str(spk)] = vals
 
     out = {
         "transcript":            " ".join(s.get("text", "") for s in segments).strip(),
