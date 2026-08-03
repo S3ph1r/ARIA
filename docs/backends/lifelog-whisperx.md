@@ -762,3 +762,58 @@ per la revisione più recente di ciascun modello pinnato e la confronta con
 quella in cache locale, senza scaricare nulla. Da lanciare a mano, di tanto in
 tanto — non è collegato all'avvio del backend né a nessuno scheduler, per non
 introdurre variabilità in un setup che oggi funziona.
+
+## 14. Pacchetto grezzo archiviabile — `diarization_raw` + `diarization_embeddings` (2026-08-03)
+
+### Il problema che risolve
+
+Ogni volta che Lifelog2 vuole ritarare la logica di costruzione turni (oggi
+`_split_fused_turns`), l'unico modo per vedere l'effetto era ririlanciare
+WhisperX sull'audio — GPU e tempo, ripetuti ad ogni iterazione. Causa: gli
+intervalli grezzi di pyannote (prima di qualunque incrocio con parole o
+turni) venivano buttati via dopo l'uso — ne sopravvivevano solo statistiche
+aggregate (`diarization_stats`, vedi §2bis) — e gli embedding erano calcolati
+solo per turno GIÀ COSTRUITO, quindi legati a una decisione che può cambiare.
+
+### Cosa cambia nel contratto
+
+Due campi nuovi, additivi, entrambi indipendenti da `_split_fused_turns` e da
+qualunque logica di costruzione turni:
+
+| campo | contenuto |
+|---|---|
+| `diarization_raw` | `[{start_ms, end_ms, speaker}, …]` — TUTTI gli intervalli di pyannote, grezzi, ordinati nel tempo. Prima venivano scartati dopo `assign_word_speakers` |
+| `diarization_embeddings` | `[{speaker, interval_indices, start_ms, end_ms, embedding}, …]` — un embedding voiceprint (256d) per ogni cluster minimo embeddabile di intervalli consecutivi della stessa etichetta. `interval_indices` punta agli indici in `diarization_raw` che lo compongono |
+
+`_embed_raw_clusters` (nuova funzione) costruisce i cluster: accorpa
+intervalli consecutivi della stessa etichetta finché non superano
+`RAW_CLUSTER_MIN_MS = 500` (stessa soglia minima di `_embed_intervals`). Un
+resto sotto soglia a fine sequenza si attacca al cluster precedente della
+stessa etichetta se esiste, altrimenti resta senza embedding — stesso
+comportamento di oggi per un turno troppo corto.
+
+### Perché questa granularità e non "per turno"
+
+Un turno è una decisione di Lifelog2, cambia se cambia la logica. Un
+intervallo grezzo di pyannote no — è il dato più fine e stabile disponibile.
+Legare l'embedding al turno significa che ogni ritaratura invalida tutti gli
+embedding storici; legarlo al cluster grezzo permette di **ricombinarli**
+(media, poi normalizzazione L2 — stessa tecnica dei centroidi voiceprint) per
+qualunque raggruppamento futuro, senza mai richiamare GPU né audio grezzo
+(cancellato da Lifelog2 subito dopo la trascrizione, quindi comunque non più
+disponibile in un secondo momento).
+
+### Costo
+
+Più chiamate al modello di embedding per segmento (un cluster invece che un
+turno finale — tipicamente qualche volta in più) — nessuna misurazione
+sistematica fatta, la decisione è stata di procedere senza: il vantaggio a
+valle (mai più ririlanciare WhisperX per ritarare la costruzione turni) è
+stato giudicato nettamente superiore al costo di qualche secondo in più per
+segmento in Stage C.
+
+### Consumatori
+
+Nessuno ancora — campo predisposto per il refactor lato Lifelog2 (nuovo
+modulo tra Stage C e C1 che ricostruisce i turni da `word_timestamps` +
+`diarization_raw`, in corso di progettazione).

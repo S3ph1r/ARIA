@@ -308,6 +308,80 @@ def _embed_intervals(
 # attraversa più turni A-B-A trascini dentro la finestra di un altro turno.
 _DIAR_MARGIN_MS = 1000
 
+# Soglia minima per un embedding voiceprint (stessa di _embed_intervals) — usata
+# per accorpare cluster di intervalli grezzi troppo brevi da soli.
+RAW_CLUSTER_MIN_MS = 500
+
+
+def _embed_raw_clusters(
+    waveform: torch.Tensor,
+    diarization_raw: list[dict],
+) -> list[dict]:
+    """Un embedding voiceprint per gruppo di intervalli pyannote GREZZI (non
+    ancora incrociati con nessuna logica di costruzione turni), pensato per
+    essere l'unità più piccola e stabile possibile da archiviare (2026-08-03).
+
+    Perché non "per turno": i turni sono una decisione di Lifelog2 (oggi
+    _split_fused_turns, domani un'altra logica) — se l'embedding fosse legato
+    al turno, cambiare quella logica renderebbe tutti gli embedding storici
+    inutilizzabili e servirebbe ririlanciare Stage C su tutto. Legandolo invece
+    all'intervallo grezzo di pyannote (che non dipende da nessuna scelta a
+    valle), Lifelog2 può sempre ricombinare (media, poi normalizzazione L2 —
+    stessa tecnica dei centroidi voiceprint) gli embedding già calcolati per
+    qualunque raggruppamento in turni decida in futuro, senza mai richiamare
+    né GPU né audio grezzo (cancellato subito dopo questa richiesta).
+
+    Accorpa gli intervalli consecutivi della STESSA etichetta (ordinati nel
+    tempo) finché non superano RAW_CLUSTER_MIN_MS — sotto soglia un embedding
+    non è affidabile (vedi _embed_intervals). Un resto sotto soglia alla fine
+    si attacca all'ultimo cluster della stessa etichetta se esiste; altrimenti
+    resta senza embedding, esattamente come oggi per un turno troppo breve.
+
+    Ogni cluster porta `interval_indices` — gli indici in `diarization_raw`
+    che lo compongono — cosi il consumatore sa sempre esattamente quali
+    intervalli grezzi condividono quell'embedding."""
+    if _voiceprint_model is None or not diarization_raw:
+        return []
+
+    by_speaker: dict[str, list[int]] = {}
+    for i, d in enumerate(diarization_raw):
+        by_speaker.setdefault(d["speaker"], []).append(i)
+
+    clusters: list[dict] = []
+    for spk, idxs in by_speaker.items():
+        idxs = sorted(idxs, key=lambda i: diarization_raw[i]["start_ms"])
+        cur_idxs: list[int] = []
+        cur_ms = 0
+        for i in idxs:
+            iv = diarization_raw[i]
+            cur_idxs.append(i)
+            cur_ms += iv["end_ms"] - iv["start_ms"]
+            if cur_ms >= RAW_CLUSTER_MIN_MS:
+                clusters.append({"speaker": spk, "interval_indices": list(cur_idxs)})
+                cur_idxs = []
+                cur_ms = 0
+        if cur_idxs:
+            if clusters and clusters[-1]["speaker"] == spk:
+                clusters[-1]["interval_indices"].extend(cur_idxs)
+            # altrimenti: troppo poco audio per questa etichetta in tutto il
+            # segmento, nessun embedding — stesso comportamento di oggi.
+
+    out: list[dict] = []
+    for c in clusters:
+        intervals = [(diarization_raw[i]["start_ms"], diarization_raw[i]["end_ms"])
+                     for i in c["interval_indices"]]
+        emb = _embed_intervals(waveform, intervals)
+        if emb is None:
+            continue
+        out.append({
+            "speaker":          c["speaker"],
+            "interval_indices": c["interval_indices"],
+            "start_ms":         intervals[0][0],
+            "end_ms":           intervals[-1][1],
+            "embedding":        emb,
+        })
+    return out
+
 
 def _turn_diar_intervals(
     diar_by_spk: dict[str, list[tuple[int, int]]],
@@ -738,6 +812,25 @@ def _to_contract(
             logger.warning("Intervalli pyannote non indicizzabili: %s", exc)
             diar_by_spk = {}
 
+    # Archivio grezzo (2026-08-03): TUTTI gli intervalli di pyannote, prima di
+    # qualunque incrocio con turni/parole — non buttati via come accadeva finora
+    # (qui sopravvivevano solo statistiche aggregate, vedi _log_diarization_stats).
+    # Permette a Lifelog2 di ricostruire/ritarare la logica di costruzione turni
+    # (oggi _split_fused_turns) senza mai richiamare WhisperX su questo audio.
+    diarization_raw: list[dict] = []
+    if diarize_df is not None:
+        try:
+            for _, r in diarize_df.iterrows():
+                diarization_raw.append({
+                    "start_ms": int(float(r["start"]) * 1000),
+                    "end_ms":   int(float(r["end"]) * 1000),
+                    "speaker":  str(r["speaker"]),
+                })
+            diarization_raw.sort(key=lambda d: d["start_ms"])
+        except Exception as exc:
+            logger.warning("diarization_raw non serializzabile: %s", exc)
+            diarization_raw = []
+
     # Per-turn quality metrics + individual voiceprint embedding
     waveform = torch.from_numpy(audio_np).unsqueeze(0)
     for i, turn in enumerate(speaker_turns):
@@ -796,6 +889,7 @@ def _to_contract(
         #   dove l'assegnazione per parola sbaglia sui confini. Misurato: nel
         #   campione del pub 11 turni su 98 sono impuri, il peggiore a 0.37.
         turn["usable_audio_ms"] = sum(e - s for s, e in intervalli) if intervalli else 0
+
         parole_turno = [
             w for w in wx_result.get("word_segments", [])
             if w.get("speaker") is not None
@@ -809,6 +903,12 @@ def _to_contract(
             turn["speaker_purity"] = round(ok_ms / tot_ms, 3)
         else:
             turn["speaker_purity"] = None
+
+    # Embedding per cluster di intervalli grezzi (2026-08-03) — vedi
+    # _embed_raw_clusters: unità stabile, indipendente dalla logica di
+    # costruzione turni, così Lifelog2 può ricombinarli per qualunque
+    # raggruppamento scelga in futuro senza mai richiamare GPU o audio grezzo.
+    diarization_embeddings = _embed_raw_clusters(waveform, diarization_raw)
 
     # word_timestamps: flat list with ms timestamps + wav2vec2 alignment score
     # + speaker per parola (2026-07-28): assign_word_speakers lo assegna già,
@@ -890,6 +990,15 @@ def _to_contract(
         out["speaker_embeddings"] = speaker_embeddings_out
     if diarize_stats:
         out["diarization_stats"] = diarize_stats
+    # Pacchetto grezzo archiviabile (2026-08-03, vedi _embed_raw_clusters):
+    # tutti gli intervalli pyannote + un embedding per cluster minimo
+    # embeddabile, indipendenti da _split_fused_turns e da qualunque logica
+    # di costruzione turni Lifelog2 scelga in futuro — permette di ritarare
+    # quella logica senza mai ririlanciare WhisperX su questo audio.
+    if diarization_raw:
+        out["diarization_raw"] = diarization_raw
+    if diarization_embeddings:
+        out["diarization_embeddings"] = diarization_embeddings
     return out
 
 
