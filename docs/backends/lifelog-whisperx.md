@@ -1,18 +1,22 @@
-# Lifelog WhisperX — Backend STT per ARIA
+# Lifelog WhisperX — Backend STT/diarizzazione/voiceprint per ARIA
 
-> **Aggiornato**: 2026-07-28
+> **Aggiornato**: 2026-08-03
 > **Ambiente**: `%ARIA_ROOT%\envs\lifelog-whisperx` (Python 3.12)
 > **Porta**: 8091
 > **Stato**: ✅ Operativo (Blackwell Stable, confermato 2026-05-14)
-> **Client principale**: Lifelog2 (CT190 via Redis)
+> **Chi può usarlo**: qualunque app ARIA, non solo Lifelog2 — è un backend generico
+> trascrizione+diarizzazione+voiceprint, esposto sia via coda Redis standard ARIA
+> sia via HTTP diretto. Lifelog2 è oggi il primo consumatore e ha guidato lo
+> sviluppo, ma il contratto in §1bis non presuppone nulla di specifico a lui.
 
 ---
 
 ## 1. Panoramica
 
-Lifelog WhisperX è il backend di trascrizione audio di ARIA basato su WhisperX large-v3.
-Sostituisce Qwen3-ASR-1.7B come backend primario di Lifelog2, aggiungendo voiceprint 256d
-integrati (WeSpeaker ResNet293) e diarizzazione nativa.
+Lifelog WhisperX è un backend ARIA per trascrizione audio, basato su WhisperX
+large-v3, con diarizzazione nativa (pyannote community-1) e voiceprint
+integrati (WeSpeaker ResNet293, 256d). Prende un WAV in ingresso e restituisce:
+testo trascritto, chi ha parlato quando, e un'impronta vocale per identità.
 
 ### Funzionalità principali
 
@@ -21,8 +25,151 @@ integrati (WeSpeaker ResNet293) e diarizzazione nativa.
 - **Diarizzazione speaker**: pyannote community-1 — chi parla, quando
 - **Segnali di affidabilità della diarizzazione** (dal 2026-07-28): speaker per parola,
   embedding per parlante, statistiche sugli intervalli grezzi di pyannote — vedi §2bis
+- **Pacchetto grezzo archiviabile** (dal 2026-08-03): intervalli pyannote completi +
+  un embedding per cluster minimo, indipendenti da come un consumatore sceglie di
+  raggruppare i turni — vedi §14
 - **Voiceprint embedding**: WeSpeaker ResNet293 (`Wespeaker/wespeaker-voxceleb-resnet293-LM`), vettore 256d per speaker, pooling su max 30s
-- **Output contract identico a Qwen3-ASR**: Stage C è model-agnostic
+- **Output contract identico a Qwen3-ASR**: Stage C (Lifelog2) è model-agnostic, ma
+  il contratto qui sotto è generico e non presuppone Lifelog2
+
+---
+
+## 1bis. Contratto — endpoint, parametri, schema completo (riferimento unico)
+
+Questa sezione è la fonte di verità per **qualunque consumatore**, presente o
+futuro: cosa mandare, cosa torna indietro, campo per campo. Le altre sezioni
+del documento spiegano il *perché* di certe scelte (misure, tentativi falliti,
+bug fix) — per usare il backend basta questa.
+
+### Come invocarlo
+
+**Via coda Redis** (pattern standard ARIA, per client remoti):
+```
+aria:q:stt:local:whisperx-large-v3:lifelog
+```
+`aria:q:{model_type}:local:{model_id}:{client_id}` — l'orchestratore ARIA
+(`ModelProcessManager` + `LifelogWhisperXBackend`) instrada il job al server
+HTTP locale e ripubblica il risultato su `callback_key`. Vedi §4 per il
+payload completo del task Redis.
+
+**Via HTTP diretto** (stesso host, o rete locale se il servizio è raggiungibile):
+```
+POST http://127.0.0.1:8091/transcribe
+POST http://127.0.0.1:8091/voiceprint
+GET  http://127.0.0.1:8091/health
+```
+Nessuna autenticazione — presuppone rete fidata (LAN locale).
+
+### `POST /transcribe` — richiesta
+
+| campo | tipo | default | effetto |
+|---|---|---|---|
+| `wav_url` | str | **richiesto** | URL del WAV da trascrivere (16kHz mono o convertibile) |
+| `segment_id` | str | **richiesto** | identificatore libero, solo per il logging lato server |
+| `language` | str | `"it"` | codice lingua ISO per WhisperX; auto-detect se il modello non riconosce quella richiesta |
+| `min_speakers` | int \| null | `null` | vincolo inferiore sul numero di parlanti per pyannote — **misurato peggiorativo** su audio ambientale reale (vedi §2bis), usare solo se si sa già il numero esatto di parlanti |
+| `max_speakers` | int \| null | `null` | vincolo superiore, stesso avvertimento |
+| `exclusive_diarization` | bool | `false` | usa la diarizzazione non sovrapposta di pyannote invece della standard — **misurato peggiorativo** su audio con sovrapposizioni reali (vedi §2bis) |
+
+### `POST /transcribe` — risposta
+
+```json
+{"status": "done", "processing_time": 29.5, "output": { ... }}
+```
+
+`output` contiene:
+
+| campo | tipo | sempre presente? | contenuto |
+|---|---|---|---|
+| `transcript` | str | sì | testo completo, segmenti concatenati |
+| `language` | str | sì | lingua rilevata/usata |
+| `duration_ms` | int | sì | durata audio |
+| `transcription_quality` | dict | sì | `avg_logprob_mean`, `no_speech_prob_mean`, `no_speech_prob_max`, `n_segments` — qualità aggregata dell'intera trascrizione |
+| `speaker_turns` | list[dict] | sì (può essere vuota) | turni costruiti dal backend (voto di maggioranza per segmento + taglio sui cambi di parlante sostenuti, `_split_fused_turns`) — vedi schema sotto |
+| `word_timestamps` | list[dict] | sì (può essere vuota) | ogni parola, indipendente da come `speaker_turns` è stato costruito — vedi schema sotto |
+| `speaker_embeddings` | dict | solo se pyannote li ha calcolati | `{"SPEAKER_XX": [256 float], ...}` — un embedding per etichetta, sull'intero segmento. **Misurato inutilizzabile come voiceprint diretto** (vedi §2bis) — usare `speaker_turns[].embedding` o `diarization_embeddings` |
+| `diarization_stats` | dict | solo se pyannote ha prodotto intervalli | `n_intervals`, `n_speakers`, `dur_min/median/max`, `n_under_0s5`, `n_under_1s`, `short_flips` — diagnostica aggregata, non ricostruisce nulla |
+| `diarization_raw` | list[dict] | solo se pyannote ha prodotto intervalli | **tutti** gli intervalli grezzi di pyannote, non filtrati — vedi schema sotto, §14 |
+| `diarization_embeddings` | list[dict] | solo se il modello voiceprint è caricato | un embedding per cluster minimo embeddabile di intervalli grezzi — vedi schema sotto, §14 |
+
+**`speaker_turns[i]`**:
+
+| campo | tipo | sempre presente? | contenuto |
+|---|---|---|---|
+| `speaker` | str | sì | etichetta locale al segmento (`SPEAKER_00`, `SPEAKER_01`, ...) — **non** un'identità stabile cross-segmento |
+| `start_ms` / `end_ms` | int | sì | confini testuali (whisper), non acustici |
+| `text` | str | sì | testo del turno |
+| `split_from_fused` | bool | solo se `true` | il turno viene da uno split di `_split_fused_turns` (§10), non da un segmento whisper originale |
+| `avg_logprob` | float | sì | confidenza media ASR del turno (o del segmento padre se `split_from_fused`, non ripartibile — vedi §10) |
+| `no_speech_prob` | float | sì | probabilità media che non ci sia parlato |
+| `word_count` | int | sì | parole nel turno |
+| `n_segments_merged` | int | sì | quanti segmenti whisper originali sono confluiti in questo turno |
+| `avg_word_score` | float \| null | sì | punteggio medio di allineamento wav2vec2 delle parole del turno |
+| `avg_compression_ratio` | float | sì | indicatore di ripetizioni/loop nella trascrizione |
+| `embedding` | list[256 float] \| null | sì (chiave presente, valore null se non calcolabile) | voiceprint del turno — null se <0.5s di audio utile |
+| `embedding_source` | `"diar"` \| `"window"` \| null | sì | `"diar"` = calcolato sugli intervalli acustici pyannote di questo speaker (più pulito); `"window"` = fallback sulla finestra testuale whisper |
+| `vp_confidence` | float [0-1] | sì | affidabilità del voiceprint del turno (combina logprob, durata, parole, no_speech) |
+| `diar_intervals` | list[[int,int]] | solo se pyannote ha intervalli per questo speaker vicino al turno | intervalli acustici veri (non quelli testuali) che hanno contribuito all'embedding |
+| `acoustic_start_ms` / `acoustic_end_ms` | int | stessa condizione di `diar_intervals` | inviluppo degli intervalli acustici — i confini veri per un player audio |
+| `usable_audio_ms` | int | sì | quanto audio è entrato davvero nell'embedding (può eccedere `end_ms - start_ms`, vedi §12) |
+| `speaker_purity` | float [0-1] \| null | sì | frazione delle parole del turno il cui speaker-per-parola coincide col turno — sotto 1.0 il turno contiene parole di qualcun altro (vedi §12) |
+
+**`word_timestamps[i]`** (indipendente da `speaker_turns`, non tocca mai `_split_fused_turns`):
+
+| campo | tipo | sempre presente? |
+|---|---|---|
+| `word` | str | sì |
+| `start_ms` / `end_ms` | int | sì |
+| `score` | float | solo se wav2vec2 l'ha prodotto |
+| `speaker` | str | solo se `assign_word_speakers` l'ha assegnato |
+
+**`diarization_raw[i]`** (§14, tutti gli intervalli, ordinati per `start_ms`):
+
+| campo | tipo |
+|---|---|
+| `start_ms` / `end_ms` | int |
+| `speaker` | str |
+
+**`diarization_embeddings[i]`** (§14):
+
+| campo | tipo | contenuto |
+|---|---|---|
+| `speaker` | str | etichetta del cluster |
+| `interval_indices` | list[int] | indici in `diarization_raw` che compongono questo cluster |
+| `start_ms` / `end_ms` | int | inviluppo del cluster |
+| `embedding` | list[256 float] | voiceprint del cluster (sempre non-null: i cluster sotto soglia non producono voce in questa lista) |
+
+### `POST /voiceprint` — richiesta/risposta
+
+Estrae solo embedding, nessuna trascrizione — usato dagli script di
+(ri)enrollment identità.
+
+Richiesta: `{"wav_url": str, "segment_id": str, "turns": [{"speaker": str, "start_ms": int, "end_ms": int}, ...]}`
+— i turni sono forniti dal chiamante (non calcolati qui).
+
+Risposta: `{"status": "done", "voiceprints": {"SPEAKER_XX": [256 float], ...}}`
+— un centroide per etichetta unica in `turns`, sul concatenato dei suoi
+intervalli (max 30s).
+
+### `GET /health`
+
+`{"status": "ok", "model": "whisperx-large-v3", "device": "cuda"|"cpu", "vram_gb": float, "voiceprint": bool, "voiceprint_model": "resnet293"}`
+
+### Cosa NON garantisce questo contratto
+
+- Le etichette `SPEAKER_XX` sono **locali al singolo segmento**: `SPEAKER_00`
+  nel segmento A e `SPEAKER_00` nel segmento B non sono necessariamente la
+  stessa persona. La stabilità dell'identità cross-segmento è responsabilità
+  del consumatore (in Lifelog2: Stage C1, tramite gli embedding).
+- `speaker_turns` riflette una scelta di raggruppamento (`_split_fused_turns`,
+  voto di maggioranza per segmento) pensata per l'uso attuale di Lifelog2 — un
+  consumatore con esigenze diverse può ignorarla e ricostruire i propri turni
+  da `word_timestamps` + `diarization_raw` + `diarization_embeddings`, che non
+  dipendono da quella scelta.
+- L'audio grezzo (WAV) non viene conservato dal backend oltre la singola
+  richiesta — qualunque dato derivabile solo dall'audio (nuovi embedding su
+  intervalli non ancora coperti, ri-trascrizione) richiede di rifornire
+  `wav_url`.
 
 ---
 
