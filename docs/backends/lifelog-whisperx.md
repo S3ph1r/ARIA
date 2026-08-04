@@ -964,3 +964,54 @@ segmento in Stage C.
 Nessuno ancora — campo predisposto per il refactor lato Lifelog2 (nuovo
 modulo tra Stage C e C1 che ricostruisce i turni da `word_timestamps` +
 `diarization_raw`, in corso di progettazione).
+
+## 15. Batching di `_embed_raw_clusters` (2026-08-04)
+
+### Il costo misurato
+
+Durante il riprocessamento cronologico dell'intero storico (1072 segmenti),
+il costo reale di §14 è emerso chiaro: un segmento con diarizzazione
+frammentata (50-80 intervalli grezzi per un solo parlante, tipico di audio
+ambientale rumoroso) arrivava a **140-320s aggiuntivi** solo nella fase
+voiceprint — senza nessuna proporzione con la quantità di parlato reale (un
+segmento da 469 caratteri con 82 intervalli costava quanto uno da 4000+
+caratteri). Causa: una chiamata al modello ResNet293 PER cluster, invece che
+una sola per il segmento — il costo fisso di ogni chiamata (trasferimento
+dati alla GPU, avvio del calcolo) si sommava 50-80 volte.
+
+### Il vicolo cieco: `weights` non maschera il padding come documentato
+
+Primo tentativo: raggruppare crop di lunghezza diversa in un unico batch,
+usando il parametro `weights` di `WeSpeakerResNet293.forward` (pooling
+statistico pesato per frame, così la sua stessa docstring) per escludere il
+padding necessario a uniformare le lunghezze. **Misurato e scartato**
+(script `scratch/calibrate_ratio.py`, non nel repo): anche una differenza di
+lunghezza del 5% tra il crop più corto e il più lungo nello stesso batch
+produceva `cosine_similarity=0.996` contro il risultato della chiamata
+singola — ben sotto una soglia di sicurezza (0.999). Il pooling non esclude
+correttamente i frame pesati a zero come la documentazione lascerebbe
+intendere; non approfondito oltre (rischio di un'altra assunzione sbagliata
+su un componente critico per l'identità).
+
+### La soluzione: mai padding, solo troncatura a lunghezza già identica
+
+`_embed_batch_grouped` raggruppa i crop **solo** per bucket di durata
+(`_EMBED_BUCKET_SAMPLES` = 8000 campioni = 500ms, stessa risoluzione di
+`RAW_CLUSTER_MIN_MS`), troncando ogni crop del gruppo alla lunghezza esatta
+del bucket (mai riempendo con zeri) — quando tutti i crop di un batch hanno
+già la stessa identica lunghezza, `cosine_similarity=1.000000` esatta contro
+la chiamata singola (verificato, stesso script). Un crop senza compagni nel
+suo bucket resta da solo, sulla sua lunghezza intera — nessun compromesso
+per lui.
+
+Costo accettato: fino a 500ms di coda troncata sui crop più lunghi del loro
+bucket — trascurabile per un embedding di identità (il minimo già accettato
+altrove nel sistema è comunque 0.5s totali).
+
+### Risultato
+
+Su un campione misto di 9 crop (0.6-9.0s, alcuni con durate quasi identiche
+apposta per testare il raggruppamento): tempo dimezzato rispetto a chiamate
+singole (1.00s → 0.49s) — il guadagno cresce con più cluster per bucket, che
+è esattamente il caso peggiore misurato in produzione (audio con
+diarizzazione frammentata, molti intervalli brevi di durata simile).

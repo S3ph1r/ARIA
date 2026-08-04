@@ -339,7 +339,15 @@ def _embed_raw_clusters(
 
     Ogni cluster porta `interval_indices` — gli indici in `diarization_raw`
     che lo compongono — cosi il consumatore sa sempre esattamente quali
-    intervalli grezzi condividono quell'embedding."""
+    intervalli grezzi condividono quell'embedding.
+
+    Costo misurato (2026-08-03, riprocessamento storico): con 50-80 cluster
+    per segmento (audio con diarizzazione frammentata), il ciclo originale —
+    una chiamata al modello PER cluster — arrivava a 140-320s extra a
+    segmento, senza nessuna proporzione con la quantità di parlato reale (un
+    segmento da 469 caratteri con 82 intervalli costava quanto uno da 4000+
+    caratteri). Da qui _embed_batch_grouped: stesso calcolo, un solo giro di
+    GPU per gruppo invece che uno per cluster."""
     if _voiceprint_model is None or not diarization_raw:
         return []
 
@@ -366,13 +374,39 @@ def _embed_raw_clusters(
             # altrimenti: troppo poco audio per questa etichetta in tutto il
             # segmento, nessun embedding — stesso comportamento di oggi.
 
-    out: list[dict] = []
+    # Costruisci i crop (concatenato degli intervalli di ogni cluster) prima
+    # di chiamare il modello — stessa logica di _embed_intervals, ripetuta qui
+    # perché serve il crop grezzo per raggrupparli per durata sotto.
+    sr = 16000
+    crops: list[torch.Tensor] = []
+    valid_clusters: list[dict] = []
     for c in clusters:
-        intervals = [(diarization_raw[i]["start_ms"], diarization_raw[i]["end_ms"])
-                     for i in c["interval_indices"]]
-        emb = _embed_intervals(waveform, intervals)
+        pieces = []
+        for i in c["interval_indices"]:
+            iv = diarization_raw[i]
+            s = max(0, int(iv["start_ms"] / 1000 * sr))
+            e = min(waveform.shape[1], int(iv["end_ms"] / 1000 * sr))
+            if e > s:
+                pieces.append(waveform[:, s:e])
+        if not pieces:
+            continue
+        crop = torch.cat(pieces, dim=1)
+        if crop.shape[1] < sr // 2:   # < 0.5s, stessa soglia di _embed_intervals
+            continue
+        crops.append(crop)
+        valid_clusters.append(c)
+
+    if not crops:
+        return []
+
+    embeddings = _embed_batch_grouped(crops)
+
+    out: list[dict] = []
+    for c, emb in zip(valid_clusters, embeddings):
         if emb is None:
             continue
+        intervals = [(diarization_raw[i]["start_ms"], diarization_raw[i]["end_ms"])
+                     for i in c["interval_indices"]]
         out.append({
             "speaker":          c["speaker"],
             "interval_indices": c["interval_indices"],
@@ -381,6 +415,94 @@ def _embed_raw_clusters(
             "embedding":        emb,
         })
     return out
+
+
+# Risoluzione dei bucket di durata (in campioni, 16kHz) — vedi _embed_batch_grouped.
+# Misurato empiricamente il 2026-08-04 (script scratch/calibrate_ratio.py):
+# il parametro `weights` di WeSpeakerResNet293.forward NON esclude
+# correttamente il padding dal pooling statistico come la sua documentazione
+# lascerebbe intendere — anche un solo frame di differenza tra il crop più
+# corto e il più lungo nello stesso batch (rapporto 1.05, cioè 5%) produce
+# similarità 0.996 col risultato singolo, ben sotto la soglia di sicurezza
+# (0.999). L'ipotesi del padding mascherato è quindi scartata: si raggruppa
+# SOLO se le lunghezze sono già identiche (troncando i crop più lunghi alla
+# lunghezza del più corto del gruppo, mai riempiendo con zeri) — verificato
+# dare similarità 1.00000 esatta quando il rapporto è 1.0.
+_EMBED_BUCKET_SAMPLES = 8000  # 500ms a 16kHz — stessa risoluzione di RAW_CLUSTER_MIN_MS
+
+
+def _embed_batch_grouped(crops: list[torch.Tensor]) -> list[list[float] | None]:
+    """Embedding di N crop in meno passaggi di GPU invece di N (2026-08-04).
+
+    Raggruppa SOLO crop la cui durata cade nello stesso bucket da
+    _EMBED_BUCKET_SAMPLES campioni, troncando ogni crop del gruppo alla
+    lunghezza del bucket (mai al massimo del gruppo, mai con padding) — un
+    solo passaggio di GPU senza nessuna differenza di lunghezza da
+    compensare, quindi nessun rischio di distorsione (vedi nota sopra sul
+    parametro `weights` scartato). Un crop senza compagni della stessa durata
+    resta da solo: nessun guadagno possibile per lui, nessun compromesso
+    sulla qualità nemmeno per lui.
+
+    Costo: fino a _EMBED_BUCKET_SAMPLES (0.5s) di coda troncata sui crop più
+    lunghi del loro bucket — trascurabile per l'identità (il minimo già
+    accettato altrove è 0.5s totali).
+
+    Ritorna una lista nello stesso ordine di `crops` (non di elaborazione
+    interna)."""
+    n = len(crops)
+    buckets: dict[int, list[int]] = {}
+    for i, c in enumerate(crops):
+        key = c.shape[1] // _EMBED_BUCKET_SAMPLES
+        buckets.setdefault(key, []).append(i)
+
+    results: list[list[float] | None] = [None] * n
+    for key, idxs in buckets.items():
+        target_len = key * _EMBED_BUCKET_SAMPLES
+        if len(idxs) == 1 or target_len < 16000 // 2:
+            # gruppo singolo, o sotto la soglia minima di 0.5s se troncato:
+            # ogni membro va per conto suo, sulla sua lunghezza reale intera.
+            for i in idxs:
+                results[i] = _embed_single(crops[i])
+            continue
+        truncated = [crops[i][:, :target_len] for i in idxs]
+        embs = _embed_group_same_length(truncated)
+        for i, emb in zip(idxs, embs):
+            results[i] = emb
+    return results
+
+
+def _embed_group_same_length(group: list[torch.Tensor]) -> list[list[float] | None]:
+    """Un solo passaggio del modello per crop GIÀ della stessa identica
+    lunghezza — nessun padding, nessun parametro `weights` necessario.
+
+    Fallback: se qualcosa va storto, richiama _embed_single uno per uno sullo
+    stesso gruppo — mai silenziosamente sbagliato, solo più lento per quel
+    gruppo specifico."""
+    dev = next(_voiceprint_model.parameters()).device
+    try:
+        batch = torch.stack([c.to(dev) for c in group], dim=0)  # (n, 1, samples)
+        with torch.no_grad():
+            embs = _voiceprint_model(batch)
+        return [e.cpu().tolist() for e in embs]
+    except Exception as exc:
+        logger.warning(
+            "Voiceprint batch (%d crop, stessa lunghezza) fallito, fallback a chiamate singole: %s",
+            len(group), exc,
+        )
+        return [_embed_single(c) for c in group]
+
+
+def _embed_single(crop: torch.Tensor) -> list[float] | None:
+    """Stesso calcolo di _embed_intervals ma già sul crop pronto (concatenato,
+    non ancora verificato) — usato dal fallback di _embed_group."""
+    dev = next(_voiceprint_model.parameters()).device
+    try:
+        with torch.no_grad():
+            emb = _voiceprint_model(crop.to(dev).unsqueeze(0))
+        return emb[0].cpu().tolist()
+    except Exception as exc:
+        logger.warning("Voiceprint singolo fallito: %s", exc)
+        return None
 
 
 def _turn_diar_intervals(
