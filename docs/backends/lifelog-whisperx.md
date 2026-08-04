@@ -1015,3 +1015,46 @@ apposta per testare il raggruppamento): tempo dimezzato rispetto a chiamate
 singole (1.00s → 0.49s) — il guadagno cresce con più cluster per bucket, che
 è esattamente il caso peggiore misurato in produzione (audio con
 diarizzazione frammentata, molti intervalli brevi di durata simile).
+
+## 16. `whisper_segments` — l'ultimo pezzo del pacchetto grezzo (2026-08-04)
+
+### Il buco trovato provando a usare §14 in pratica
+
+Lifelog2 ha iniziato a scrivere una replica della costruzione turni usando
+solo `word_timestamps` (§14) su dati reali già archiviati, per verificarla
+contro `speaker_turns` prima di fidarsene. Risultato: solo il 32% dei
+segmenti corrispondeva. Causa, isolata su un caso concreto (`7f926171`): **la
+maggior parte delle parole in `word_timestamps` non ha nessun `speaker`
+diretto** — `assign_word_speakers` etichetta una parola solo se il suo
+timestamp cade dentro un intervallo di pyannote, e la maggioranza delle
+parole non ci cade (finiscono nei buchi tra un intervallo e l'altro).
+
+`_to_contract` "ripara" questo con il voto di maggioranza **per segmento
+whisper** (righe 854 e seguenti): guarda tutte le parole di un segmento,
+comprese quelle senza `speaker` diretto, e assegna al segmento intero
+l'etichetta più frequente tra quelle che ce l'hanno. Le parole senza
+etichetta "prendono in prestito" quella del segmento. Senza i confini dei
+segmenti whisper — mai archiviati fino ad oggi — quel prestito non è
+ricostruibile a posteriori: l'informazione su quali parole appartengono allo
+stesso segmento va persa non appena l'audio (già cancellato) non c'è più.
+
+### Cosa cambia nel contratto
+
+Nuovo campo additivo, quando `wx_result` produce segmenti:
+
+| campo | contenuto |
+|---|---|
+| `whisper_segments` | `[{speaker, start_ms, end_ms, text, avg_logprob, no_speech_prob, compression_ratio}, …]` — i segmenti whisper grezzi, PRIMA di qualunque fusione o taglio, con lo stesso `speaker` di maggioranza che `_to_contract` già legge da `seg.get("speaker")` |
+
+Nessun calcolo nuovo: sono campi che il ciclo di costruzione turni già legge
+da ogni segmento — qui vengono anche serializzati, non solo consumati e
+scartati. A differenza di §14/§15, questa è pura serializzazione di dati già
+pronti, nessun rischio numerico da verificare.
+
+### Con questo, il pacchetto è completo
+
+Rileggendo `_to_contract` per intero: parola per parola (`word_timestamps`),
+segmento whisper grezzo (`whisper_segments`, qui), intervallo pyannote grezzo
++ suo embedding (`diarization_raw`/`diarization_embeddings`, §14), qualità
+aggregata (`transcription_quality`) — non risulta altro che il ciclo di
+costruzione turni usi e che non sia già in uno di questi quattro posti.

@@ -838,6 +838,35 @@ def _to_contract(
     turn_word_scores:       list[list[float]] = []
     turn_compression_ratios: list[list[float]] = []
 
+    # Archivio grezzo (2026-08-04): i confini dei segmenti whisper, PRIMA di
+    # qualunque voto di maggioranza o taglio — mancava dal pacchetto di §14.
+    # Scoperto rileggendo assign_word_speakers: la maggior parte delle parole
+    # in word_timestamps non ricade in NESSUN intervallo di pyannote e resta
+    # senza `speaker` — è il voto di maggioranza per segmento whisper (fatto
+    # qui sotto, su TUTTE le parole del segmento comprese quelle senza
+    # etichetta diretta) a "prestare" loro il parlante del segmento. Senza
+    # questi confini, ricostruire i turni da word_timestamps da solo perde
+    # sistematicamente quelle parole — non è ricostruibile a posteriori
+    # dall'audio, che a quel punto è già cancellato.
+    whisper_segments: list[dict] = []
+    for seg in segments:
+        spk_ws = seg.get("speaker", "SPEAKER_00")
+        lp_ws = seg.get("avg_logprob")
+        if lp_ws is None:
+            lp_ws = -0.5
+        ns_ws = seg.get("no_speech_prob")
+        if ns_ws is None:
+            ns_ws = 0.1
+        whisper_segments.append({
+            "speaker":           spk_ws,
+            "start_ms":          int(seg.get("start", 0) * 1000),
+            "end_ms":            int(seg.get("end", 0) * 1000),
+            "text":              seg.get("text", "").strip(),
+            "avg_logprob":       round(float(lp_ws), 4),
+            "no_speech_prob":    round(float(ns_ws), 4),
+            "compression_ratio": round(float(seg.get("compression_ratio", 1.0)), 4),
+        })
+
     # ── Costruzione turni: per SEGMENTO (comportamento storico) ──────────────
     # Il taglio per PAROLA (provato il 2026-07-28) e' tecnicamente corretto —
     # assign_word_speakers assegna lo speaker a ogni parola e whisperx lo
@@ -1121,6 +1150,12 @@ def _to_contract(
         out["diarization_raw"] = diarization_raw
     if diarization_embeddings:
         out["diarization_embeddings"] = diarization_embeddings
+    # Segmenti grezzi di whisper (2026-08-04, vedi nota sopra dove vengono
+    # costruiti) — l'ultimo pezzo mancante del pacchetto: senza i suoi confini
+    # e il suo parlante di maggioranza, le parole senza `speaker` diretto in
+    # word_timestamps non sono riattribuibili a posteriori.
+    if whisper_segments:
+        out["whisper_segments"] = whisper_segments
     return out
 
 
