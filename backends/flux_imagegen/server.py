@@ -15,16 +15,40 @@ Blackwell SM_120 notes:
 
 JIT pattern: loaded on startup (lifespan), unloaded on shutdown.
 Output: JPEG saved to ARIA_OUTPUT_DIR, served via asset server (port 8082).
+
+2026-08-15: aggiunto heartbeat + traceback completo attorno a ogni fase di
+_load_models() — prima un'eccezione in from_pretrained() (o un blocco senza
+eccezione, es. I/O lento) spariva nel silenzio: l'unico log era "Loading
+Flux2KleinPipeline from ..." seguito da niente, per minuti, senza dire se il
+processo stava ancora lavorando o era già morto. Vedi indagine 2026-08-15
+sui crash ricorrenti di ricaricamento dopo uno swap GPU Exclusivity.
+
+2026-08-15 (2): self-reporting del PID reale su file (vedi PID_FILE sotto).
+Causa radice trovata in aria_node_controller/core/orchestrator.py: il
+processo lanciato con 'start "titolo" cmd.exe /k ...' fa sì che l'oggetto
+Popen tracciato da ARIA sia il lanciatore 'start', che termina da solo
+entro pochi secondi — rendendo proc.poll() inaffidabile per sapere se
+QUESTO backend è ancora vivo. _kill_proc() controllava proc.poll() prima
+di tentare il kill: quasi sempre falso per un processo idle da tempo,
+quindi il kill non partiva mai e ARIA si "dimenticava" del backend senza
+ucciderlo — VRAM/RAM restavano occupate. Scrivendo qui il PID vero (+
+create_time, per proteggersi da riuso del PID) su file, l'orchestratore può
+verificare/uccidere il processo esatto invece di affidarsi al Popen rotto o
+al match per titolo finestra con wildcard (rischio di colpire finestre con
+titolo simile).
 """
 
 import os
 import gc
 import io
 import time
+import json
 import logging
 import random
+import threading
 from pathlib import Path
 
+import psutil
 import torch
 
 LOG_FILE = r"C:\Users\Roberto\aria\logs\flux_imagegen.log"
@@ -56,7 +80,80 @@ ARIA_ROOT      = Path(os.environ.get("ARIA_ROOT", r"C:\Users\Roberto\ARIA"))
 MODEL_PATH     = ARIA_ROOT / "data" / "assets" / "models" / "flux2-klein-4b"
 ARIA_OUTPUT_DIR = ARIA_ROOT / "data" / "outputs"
 
+# Self-reporting del PID reale per l'orchestratore (vedi nota in cima al file).
+# Stessa convenzione di nome che orchestrator.py si aspetta: {model_id}.pid
+# dentro aria_root/logs/pids/ — "flux2-klein-4b" è il model_id nel manifest.
+PID_DIR  = Path(r"C:\Users\Roberto\aria\logs\pids")
+PID_FILE = PID_DIR / "flux2-klein-4b.pid"
+
 _pipe = None
+
+
+def _write_pid_file() -> None:
+    try:
+        PID_DIR.mkdir(parents=True, exist_ok=True)
+        pid = os.getpid()
+        create_time = psutil.Process(pid).create_time()
+        PID_FILE.write_text(json.dumps({"pid": pid, "create_time": create_time}))
+        logger.info("PID file scritto: %s (pid=%d)", PID_FILE, pid)
+    except Exception:
+        logger.exception("Errore scrivendo il PID file %s", PID_FILE)
+
+
+def _remove_pid_file() -> None:
+    try:
+        PID_FILE.unlink(missing_ok=True)
+        logger.info("PID file rimosso: %s", PID_FILE)
+    except Exception:
+        logger.exception("Errore rimuovendo il PID file %s", PID_FILE)
+
+
+class _Heartbeat:
+    """Logga un battito ogni interval_s finché il blocco `with` non esce —
+    senza questo, una fase lenta (I/O disco, allocazione RAM/VRAM) è
+    indistinguibile nel log da un processo già morto in silenzio."""
+
+    def __init__(self, label: str, t0: float, interval_s: float = 5.0):
+        self.label = label
+        self.t0 = t0
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self._stop.wait(self.interval_s):
+            logger.info(
+                "%s: ancora in corso... %.1fs trascorsi",
+                self.label, time.time() - self.t0,
+            )
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        return False
+
+
+def _log_resource_snapshot(prefix: str) -> None:
+    """RAM libera + VRAM allocata/riservata, per correlare rallentamenti coi
+    log di sistema (indagine 2026-08-15: sospetto pressione RAM/VRAM non
+    rilasciata dopo un kill di GPU Exclusivity, non ancora confermato)."""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        ram_msg = f"RAM libera: {vm.available / 1e9:.1f}/{vm.total / 1e9:.1f} GB"
+    except Exception as exc:
+        ram_msg = f"RAM libera: n/d ({exc})"
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        vram_msg = f"VRAM allocata={alloc:.1f}GB riservata={reserved:.1f}GB"
+    else:
+        vram_msg = "VRAM: n/d (no CUDA)"
+    logger.info("%s — %s | %s", prefix, ram_msg, vram_msg)
 
 
 def _load_models():
@@ -66,23 +163,45 @@ def _load_models():
 
     logger.info("Loading Flux2KleinPipeline from %s ...", MODEL_PATH)
     t0 = time.time()
+    _log_resource_snapshot("Snapshot risorse prima del caricamento")
 
-    _pipe = Flux2KleinPipeline.from_pretrained(
-        str(MODEL_PATH),
-        torch_dtype=DTYPE,
-        local_files_only=True,
-    )
+    try:
+        with _Heartbeat("from_pretrained (lettura pesi da disco + istanziazione componenti)", t0):
+            _pipe = Flux2KleinPipeline.from_pretrained(
+                str(MODEL_PATH),
+                torch_dtype=DTYPE,
+                local_files_only=True,
+            )
+    except Exception:
+        logger.exception(
+            "Flux2KleinPipeline.from_pretrained FALLITO dopo %.1fs", time.time() - t0
+        )
+        _log_resource_snapshot("Snapshot risorse al momento del fallimento")
+        raise
     logger.info("Pipeline loaded from disk in %.1fs", time.time() - t0)
 
     # INT8 quantize text encoder (Qwen3-4B) on CPU before moving to GPU:
     # 7.50 GB BF16 → 3.75 GB INT8
     logger.info("Quantizing text encoder (Qwen3-4B) INT8 via optimum-quanto ...")
     t1 = time.time()
-    quantize(_pipe.text_encoder, weights=qint8)
-    freeze(_pipe.text_encoder)
+    try:
+        with _Heartbeat("quantizzazione text encoder", t1):
+            quantize(_pipe.text_encoder, weights=qint8)
+            freeze(_pipe.text_encoder)
+    except Exception:
+        logger.exception("Quantizzazione text encoder FALLITA dopo %.1fs", time.time() - t1)
+        _log_resource_snapshot("Snapshot risorse al momento del fallimento")
+        raise
     logger.info("Text encoder quantized in %.1fs", time.time() - t1)
 
-    _pipe.to(DEVICE)
+    t2 = time.time()
+    try:
+        with _Heartbeat("spostamento pipeline su GPU (.to(cuda))", t2):
+            _pipe.to(DEVICE)
+    except Exception:
+        logger.exception("_pipe.to(%s) FALLITO dopo %.1fs", DEVICE, time.time() - t2)
+        _log_resource_snapshot("Snapshot risorse al momento del fallimento")
+        raise
 
     vram = round(torch.cuda.memory_allocated() / 1e9, 1) if torch.cuda.is_available() else 0
     logger.info("Pipeline on GPU — VRAM allocated: %.1f GB (total: %.1fs)", vram, time.time() - t0)
@@ -90,19 +209,33 @@ def _load_models():
 
 def _unload_models():
     global _pipe
-    del _pipe
-    _pipe = None
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    logger.info("Models unloaded, VRAM freed.")
+    t0 = time.time()
+    try:
+        del _pipe
+        _pipe = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Models unloaded, VRAM freed. (%.1fs)", time.time() - t0)
+    except Exception:
+        logger.exception("Errore durante _unload_models dopo %.1fs", time.time() - t0)
+        raise
+    finally:
+        _log_resource_snapshot("Snapshot risorse dopo unload")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _load_models()
-    yield
-    _unload_models()
+    # Scritto PRIMA di _load_models(): così l'orchestratore vede che il
+    # processo esiste (magari ancora in caricamento) anche se il caricamento
+    # stesso si blocca o fallisce — è esattamente il segnale mancante finora.
+    _write_pid_file()
+    try:
+        _load_models()
+        yield
+    finally:
+        _unload_models()
+        _remove_pid_file()
 
 
 app = FastAPI(title="ARIA FLUX.2-klein ImageGen", version="1.1.0", lifespan=lifespan)

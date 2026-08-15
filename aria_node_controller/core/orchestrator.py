@@ -8,6 +8,7 @@ import socket
 import http.server
 import socketserver
 import subprocess
+import psutil
 
 
 from pathlib import Path
@@ -287,7 +288,19 @@ class ModelProcessManager:
                 return True # L'attesa reale avverrà nel loop esterno di ensure_running
 
             # 3. Gestione processo esistente ma non responsivo
-            if proc and proc.poll() is not None:
+            # 2026-08-15: controlla PRIMA il PID reale auto-riportato — senza
+            # questo, un backend che si auto-riporta (es. flux2-klein-4b) ma
+            # è semplicemente lento a rispondere finiva SEMPRE nel ramo
+            # "terminato inaspettatamente" (perché il Popen del lanciatore
+            # 'start' è morto da tempo, vedi _kill_proc), che rilanciava un
+            # processo NUOVO sopra quello vecchio ancora vivo invece di
+            # ucciderlo prima — causa della "pila" di finestre/processi
+            # zombie diagnosticata oggi.
+            real_pid = self._read_pid_file(model_id)
+            if real_pid is not None:
+                logger.warning(f"{model_id}: processo reale (pid={real_pid}) attivo ma non risponde. Lo termino per riavvio pulito...")
+                self._kill_proc(model_id)
+            elif proc and proc.poll() is not None:
                 logger.warning(f"{model_id}: processo terminato inaspettatamente, riavvio...")
             elif proc and proc.poll() is None:
                 # Se arriviamo qui, il processo esiste ma NON è responsive.
@@ -421,30 +434,96 @@ class ModelProcessManager:
                     self._kill_proc(companion)
                 self._idle_since.pop(model_id, None)
 
+    def _read_pid_file(self, model_id: str) -> "int | None":
+        """Legge il PID reale auto-riportato dal backend, se implementa il
+        self-reporting (2026-08-15, oggi solo flux2-klein-4b — vedi
+        _write_pid_file in backends/flux_imagegen/server.py).
+
+        Verifica create_time contro il processo vivo per proteggersi da un
+        PID riusato da un processo diverso nel frattempo (il file può
+        restare stale dopo un kill secco che salta la pulizia Python).
+        Ritorna None se il file manca, è corrotto, o il PID non corrisponde
+        più a un processo vivo con lo stesso create_time registrato — in
+        quel caso il chiamante deve ricadere sul comportamento precedente
+        (Popen/titolo finestra).
+        """
+        pid_path = self.aria_root / "logs" / "pids" / f"{model_id}.pid"
+        try:
+            data = json.loads(pid_path.read_text())
+            pid, create_time = int(data["pid"]), float(data["create_time"])
+            proc = psutil.Process(pid)
+            if abs(proc.create_time() - create_time) < 1.0:
+                return pid
+        except Exception:
+            pass
+        return None
+
+    def _forget_pid_file(self, model_id: str) -> None:
+        pid_path = self.aria_root / "logs" / "pids" / f"{model_id}.pid"
+        try:
+            pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _kill_proc(self, model_id: str):
-        """Termina il processo di un singolo modello se attivo."""
+        """Termina il processo di un singolo modello se attivo.
+
+        2026-08-15: preferisce il PID reale auto-riportato (via pid-file,
+        vedi _read_pid_file) quando disponibile — chirurgico, uccide
+        esattamente quel processo per PID esatto invece di affidarsi al
+        match per titolo finestra con wildcard '*' (rischio di colpire
+        finestre con titolo simile) o al Popen del lanciatore 'start', che
+        su Windows termina da solo entro pochi secondi dall'aver aperto la
+        finestra reale — rendendo proc.poll() inaffidabile per sapere se
+        QUESTO backend è ancora vivo. Bug diagnosticato oggi: la guardia
+        'proc and proc.poll() is None' sotto era quasi sempre falsa per un
+        backend idle da tempo (il lanciatore era già morto da minuti), quindi
+        il blocco di kill non partiva MAI — ARIA si "dimenticava" del
+        backend senza mai ucciderlo, VRAM/RAM restavano occupate a tempo
+        indeterminato. Fallback al comportamento precedente per i backend
+        che non implementano ancora il self-reporting del PID.
+        """
         with self._lock:
-            proc = self._procs.get(model_id)
-            if proc and proc.poll() is None:
-                logger.info(f"{model_id}: terminazione processo (idle timeout / shutdown).")
+            real_pid = self._read_pid_file(model_id)
+            if real_pid is not None:
+                logger.info(f"{model_id}: terminazione via PID reale {real_pid} (pid-file).")
+                try:
+                    if os.name == 'nt':
+                        subprocess.run(f'taskkill /PID {real_pid} /T /F', shell=True, capture_output=True, timeout=5)
+                    else:
+                        psutil.Process(real_pid).terminate()
+                    logger.info(f"{model_id}: processo terminato (pid={real_pid}).")
+                except Exception:
+                    logger.exception(f"{model_id}: errore terminando PID {real_pid}")
+                self._forget_pid_file(model_id)
+            else:
+                proc = self._procs.get(model_id)
+                if proc and proc.poll() is None:
+                    logger.info(f"{model_id}: terminazione processo (idle timeout / shutdown, fallback titolo).")
 
-                if os.name == 'nt':
-                    # Siccome abbiamo lanciato con 'start cmd', il Popen originale è solo
-                    # l'esecutore 'start'. Dobbiamo killare l'albero processi reale dal titolo.
-                    title = f"ARIA Backend: {model_id}"
-                    subprocess.run(f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True, timeout=5)
-                else:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
+                    if os.name == 'nt':
+                        # Siccome abbiamo lanciato con 'start cmd', il Popen originale è solo
+                        # l'esecutore 'start'. Dobbiamo killare l'albero processi reale dal titolo.
+                        title = f"ARIA Backend: {model_id}"
+                        subprocess.run(f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True, timeout=5)
+                    else:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
 
-                logger.info(f"{model_id}: processo terminato.")
+                    logger.info(f"{model_id}: processo terminato (fallback titolo).")
             self._procs.pop(model_id, None)
 
     def _is_proc_active(self, model_id: str) -> bool:
-        """Ritorna True se il processo è registrato e ancora attivo."""
+        """Ritorna True se il processo è registrato e ancora attivo.
+
+        2026-08-15: controlla prima il PID reale auto-riportato (affidabile),
+        poi ricade sul Popen tracciato (inaffidabile su Windows per i
+        backend lanciati via 'start cmd', vedi _kill_proc)."""
+        if self._read_pid_file(model_id) is not None:
+            return True
         proc = self._procs.get(model_id)
         return proc is not None and proc.poll() is None
 
