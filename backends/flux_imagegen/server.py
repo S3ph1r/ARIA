@@ -48,8 +48,24 @@ import random
 import threading
 from pathlib import Path
 
+# 2026-08-15: crash ripetuti (5+ occorrenze) in torch_cpu.dll, sempre stesso
+# offset esatto (0x6019bb4), codice 0xc0000005 (access violation) — firma
+# identica ogni volta = bug deterministico nel path di threading nativo di
+# PyTorch (OpenMP/MKL), non corruzione di memoria casuale. Va impostato
+# PRIMA di 'import torch': il runtime OpenMP/MKL inizializza il pool di
+# thread all'import, torch.set_num_threads() da solo non basta a vincolarlo
+# retroattivamente. Macchina ha 12 processori logici — 4 è un compromesso
+# prudente (il caricamento è comunque solo qualche secondo più lento, non
+# tocca l'inferenza che gira su GPU). Se il crash persiste anche con questo,
+# il sospetto si sposta da "race condition di threading" a un problema più
+# di fondo (versione torch/CPU incompatibile) — vedi nota in _load_models.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+
 import psutil
 import torch
+
+torch.set_num_threads(4)
 
 LOG_FILE = r"C:\Users\Roberto\aria\logs\flux_imagegen.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
