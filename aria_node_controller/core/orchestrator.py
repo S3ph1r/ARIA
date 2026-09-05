@@ -445,6 +445,10 @@ class ModelProcessManager:
                     f"{model_id}: nessun PID scoperto via titolo finestra dopo l'health "
                     f"check — _kill_proc ricadrà sul fallback (proc.poll())."
                 )
+        # Posizione fissa (2026-09-05, Roberto): solo qui, al primo avvio
+        # fresco — mai sul percorso "backend già attivo" sopra, che gira ad
+        # ogni health check e sposterebbe la finestra in continuazione.
+        self._position_window(model_id)
         return success
 
     def mark_idle(self, model_id: str):
@@ -558,6 +562,64 @@ class ModelProcessManager:
             logger.info(f"{model_id}: PID scoperto via titolo finestra e salvato ({pid}).")
         except Exception:
             logger.exception(f"{model_id}: errore salvando il PID scoperto {pid}")
+
+    def _position_window(self, model_id: str, x: int = 0, y: int = 0) -> None:
+        """Sposta la finestra Console del backend a una posizione fissa sul
+        desktop (2026-09-05, Roberto: le finestre si aprivano sparse per lo
+        schermo — Windows/il console host non hanno un modo nativo di
+        fissare la posizione di avvio via riga di comando, l'unico modo
+        affidabile è muoverla via API Win32 SUBITO dopo che esiste).
+
+        Chiamata SOLO al primo avvio fresco (mai sul percorso "backend già
+        attivo", che gira praticamente ad ogni health check — riposizionare
+        lì sposterebbe la finestra in continuazione anche se l'utente
+        l'avesse spostata a mano nel frattempo, un comportamento fastidioso
+        e non richiesto).
+
+        EnumWindows/GetWindowText sono limitati alla STESSA sessione
+        Windows del chiamante — funziona perché questo codice gira
+        nell'orchestratore, che è nella stessa sessione desktop in cui le
+        finestre vengono aperte (stesso motivo per cui taskkill per titolo
+        funziona già altrove in questo file). Verificato che EnumWindows da
+        una sessione DIVERSA (es. una sessione SSH separata) non vede
+        queste finestre — se mai questa funzione venisse richiamata da un
+        contesto fuori sessione, fallirebbe silenziosamente allo stesso modo
+        di _discover_pid_by_window_title quando non trova nulla.
+
+        Nessuna nuova dipendenza: solo ctypes (stdlib), già disponibile
+        ovunque gira Python su Windows."""
+        if os.name != 'nt':
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            title_prefix = f"ARIA Backend: {model_id}"
+            found: list[int] = []
+
+            @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def _enum_proc(hwnd, _lparam):
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if buf.value.startswith(title_prefix):
+                        found.append(hwnd)
+                return True
+
+            user32.EnumWindows(_enum_proc, 0)
+            if not found:
+                logger.debug(f"{model_id}: nessuna finestra trovata da riposizionare (titolo {title_prefix!r}).")
+                return
+            SWP_NOSIZE, SWP_NOZORDER = 0x0001, 0x0004
+            ok = user32.SetWindowPos(found[0], 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
+            if ok:
+                logger.info(f"{model_id}: finestra riposizionata a ({x}, {y}).")
+            else:
+                logger.warning(f"{model_id}: SetWindowPos fallito per la finestra trovata.")
+        except Exception:
+            logger.exception(f"{model_id}: errore riposizionando la finestra")
 
     def _kill_proc(self, model_id: str):
         """Termina il processo di un singolo modello se attivo.
