@@ -475,24 +475,61 @@ class ModelProcessManager:
         finestre con titolo simile) o al Popen del lanciatore 'start', che
         su Windows termina da solo entro pochi secondi dall'aver aperto la
         finestra reale — rendendo proc.poll() inaffidabile per sapere se
-        QUESTO backend è ancora vivo. Bug diagnosticato oggi: la guardia
-        'proc and proc.poll() is None' sotto era quasi sempre falsa per un
-        backend idle da tempo (il lanciatore era già morto da minuti), quindi
-        il blocco di kill non partiva MAI — ARIA si "dimenticava" del
+        QUESTO backend è ancora vivo. Bug diagnosticato quel giorno: la
+        guardia 'proc and proc.poll() is None' sotto era quasi sempre falsa
+        per un backend idle da tempo (il lanciatore era già morto da minuti),
+        quindi il blocco di kill non partiva MAI — ARIA si "dimenticava" del
         backend senza mai ucciderlo, VRAM/RAM restavano occupate a tempo
         indeterminato. Fallback al comportamento precedente per i backend
         che non implementano ancora il self-reporting del PID.
-        """
+
+        2026-09-05 (Roberto, due bug trovati insieme durante il reprocess
+        storico di Lifelog2 — qwen3-14b-q4km/Flux2 in alternanza sulla stessa
+        GPU):
+
+        (a) Il self-reporting del PID esisteva SOLO per flux2-klein-4b da
+        agosto — mai esteso a qwen3-14b-q4km. Confermato dal vivo sui log:
+        uno swap "Termino qwen3-14b-q4km per far posto a flux2-klein-4b" non
+        era MAI seguito da nessuna riga di conferma (né PID né fallback
+        titolo) — il ramo PID falliva silenziosamente (nessun pid-file da
+        leggere) e il ramo fallback non partiva mai per lo stesso motivo di
+        agosto (proc.poll() falso). Risultato: llama-server.exe restava vivo
+        in VRAM mentre Flux2 tentava di caricarsi sulla stessa GPU. Esteso il
+        self-reporting anche al launcher di qwen3-14b-q4km (vedi
+        backends/lifelog_llm/launcher.py) — stessa causa, stesso fix già
+        provato su Flux2 da un mese.
+
+        (b) Anche quando il kill per PID riesce, uccide solo l'ALBERO
+        radicato in quel PID — mai il cmd.exe ANTENATO che ha aperto la
+        finestra reale (il PID auto-riportato è il processo del backend, non
+        il cmd.exe che l'ha lanciato con 'start ... cmd.exe /k ...'). Prima
+        di oggi la finestra restava quindi sempre aperta con un prompt vuoto
+        dopo un kill per PID, anche quando il kill funzionava (visibile su
+        Flux2 pure). Ora, dopo il kill per PID, si tenta SEMPRE anche la
+        chiusura per titolo finestra (stessa chiamata già usata nel fallback
+        sotto) — le due cose sono complementari, non alternative: PID per
+        essere sicuri di uccidere il processo giusto, titolo per chiudere
+        anche il guscio cmd.exe che lo conteneva. Aggiunto anche un controllo
+        esplicito del codice di uscita di ogni taskkill (prima il codice
+        dichiarava "terminato" incondizionatamente, senza controllare se il
+        comando fosse davvero riuscito)."""
         with self._lock:
             real_pid = self._read_pid_file(model_id)
             if real_pid is not None:
                 logger.info(f"{model_id}: terminazione via PID reale {real_pid} (pid-file).")
                 try:
                     if os.name == 'nt':
-                        subprocess.run(f'taskkill /PID {real_pid} /T /F', shell=True, capture_output=True, timeout=5)
+                        r = subprocess.run(f'taskkill /PID {real_pid} /T /F', shell=True, capture_output=True, timeout=5)
+                        if r.returncode == 0:
+                            logger.info(f"{model_id}: processo terminato (pid={real_pid}).")
+                        else:
+                            logger.warning(
+                                f"{model_id}: taskkill /PID {real_pid} rc={r.returncode} — "
+                                f"{r.stderr.decode(errors='replace').strip()!r}"
+                            )
                     else:
                         psutil.Process(real_pid).terminate()
-                    logger.info(f"{model_id}: processo terminato (pid={real_pid}).")
+                        logger.info(f"{model_id}: processo terminato (pid={real_pid}).")
                 except Exception:
                     logger.exception(f"{model_id}: errore terminando PID {real_pid}")
                 self._forget_pid_file(model_id)
@@ -500,20 +537,31 @@ class ModelProcessManager:
                 proc = self._procs.get(model_id)
                 if proc and proc.poll() is None:
                     logger.info(f"{model_id}: terminazione processo (idle timeout / shutdown, fallback titolo).")
-
-                    if os.name == 'nt':
-                        # Siccome abbiamo lanciato con 'start cmd', il Popen originale è solo
-                        # l'esecutore 'start'. Dobbiamo killare l'albero processi reale dal titolo.
-                        title = f"ARIA Backend: {model_id}"
-                        subprocess.run(f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True, timeout=5)
-                    else:
+                    if os.name != 'nt':
                         proc.terminate()
                         try:
                             proc.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             proc.kill()
+                        logger.info(f"{model_id}: processo terminato (fallback titolo).")
 
-                    logger.info(f"{model_id}: processo terminato (fallback titolo).")
+            # Chiusura della finestra Console (sempre tentata su Windows, non
+            # solo nel ramo senza pid-file — vedi punto (b) sopra: un kill per
+            # PID non tocca mai il cmd.exe antenato che ha aperto la finestra).
+            if os.name == 'nt':
+                title = f"ARIA Backend: {model_id}"
+                r = subprocess.run(
+                    f'taskkill /FI "WINDOWTITLE eq {title}*" /T /F', shell=True, capture_output=True, timeout=5
+                )
+                if r.returncode == 0:
+                    logger.info(f"{model_id}: finestra Console chiusa (titolo {title!r}).")
+                else:
+                    # rc != 0 qui è spesso solo "nessuna finestra con quel titolo
+                    # trovata" (già chiusa, o mai stata aperta con 'start') — non
+                    # un errore da segnalare ad ogni giro, solo un debug.
+                    logger.debug(
+                        f"{model_id}: nessuna finestra Console da chiudere (titolo {title!r}, rc={r.returncode})."
+                    )
             self._procs.pop(model_id, None)
 
     def _is_proc_active(self, model_id: str) -> bool:

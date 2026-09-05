@@ -56,6 +56,22 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 
 ---
 
+### A1-5 — Self-reporting PID mancante su quasi tutti i backend (kill silenziosamente inefficace) + finestra Console mai chiusa dopo un kill per PID
+**Stato:** in-progress (fix scritto, non ancora deployato/verificato su PC 139)
+**Priorità:** alta
+**Scoperto:** 2026-09-05 (Roberto, durante il reprocess storico di Lifelog2 — qwen3-14b-q4km e Flux2/covers in alternanza sulla stessa GPU)
+**Descrizione:** Il self-reporting del PID reale (introdotto 2026-08-15, vedi Gap Risolti sotto) esisteva SOLO per `flux2-klein-4b`. Per qualunque altro backend (qwen3-14b-q4km incluso — il più usato, il modello LLM condiviso da Lifelog2/DIAS), `_kill_proc()` ricade sul vecchio fallback (`proc.poll() is None` sul Popen del lanciatore 'start'), che è quasi sempre falso perché su Windows quel lanciatore muore da solo pochi secondi dopo aver aperto la finestra reale — il comando di kill non parte mai, l'entry viene comunque rimossa dal tracking interno (`_procs.pop`), e ARIA "dimentica" il backend senza mai ucciderlo. Confermato dal vivo sui log di produzione: uno swap "GPU Exclusivity: Termino qwen3-14b-q4km per far posto a flux2-klein-4b" non è mai seguito da nessuna riga di conferma di terminazione, a differenza della direzione opposta (Flux2, che il self-reporting ce l'ha, termina pulito col proprio PID). Rischio concreto: due modelli caricati insieme sulla stessa GPU (qwen3-14b-q4km, ~9GB+7GB KV cache, e Flux2, ~12.8GB) — a seconda della VRAM disponibile, contesa/rallentamento o superamento della capacità.
+
+**Secondo problema, distinto ma collegato:** anche quando il kill per PID riesce (caso Flux2), uccide solo l'albero radicato in quel PID — mai il `cmd.exe` antenato che ha aperto la finestra reale (lanciata con `start "titolo" cmd.exe /k ...`). La finestra Console resta quindi sempre aperta con un prompt vuoto dopo un kill per PID, anche quando il kill stesso funziona.
+
+**Fix scritto (2026-09-05):**
+- `backends/lifelog_llm/launcher.py`: stesso self-reporting PID già in produzione su `flux_imagegen/server.py`, adattato al fatto che questo launcher esegue llama-server.exe come sottoprocesso (si auto-riporta il PROPRIO pid, un taskkill `/T` su quello termina anche il figlio). Import di `psutil` avvolto in try/except esplicito — se assente nell'env `lifelog-llm` (mai verificato prima d'ora), il self-reporting viene saltato con un warning invece di far fallire l'avvio del backend.
+- `aria_node_controller/core/orchestrator.py::_kill_proc()`: dopo un kill per PID riuscito, tenta SEMPRE anche la chiusura per titolo finestra (stessa chiamata già usata nel ramo fallback) — le due cose sono complementari, non alternative. Aggiunto anche un controllo esplicito del codice di uscita di ogni `taskkill` (prima veniva dichiarato "terminato" incondizionatamente).
+**Non ancora fatto:** estendere lo stesso self-reporting agli altri backend locali (whisperx-large-v3, fish-s1-mini/voice-cloning, qwen3-tts-1.7b, qwen3-asr-1.7b, acestep-1.5-xl-sft, qwen3.5-35b-moe-q3ks) — nessuno di questi lo implementa oggi, stesso identico rischio silente. Rimandato: qwen3-14b-q4km era la priorità (il più usato, quello coinvolto nell'incidente osservato); gli altri backend, se necessario, possono replicare lo stesso pattern di `launcher.py`/`flux_imagegen/server.py`.
+**Verifica ancora da fare dopo il deploy:** confermare sul vivo (log + `nvidia-smi`/Task Manager) che uno swap qwen3→Flux2 ora produca le righe di conferma attese e che la finestra Console si chiuda davvero.
+
+---
+
 ## Gap Risolti
 
 ### A0-6 — Backend legati a 127.0.0.1 — irraggiungibili da IP esterno
