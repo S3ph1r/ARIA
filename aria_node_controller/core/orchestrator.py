@@ -278,6 +278,17 @@ class ModelProcessManager:
             if self._health_check(model_id):
                 logger.info(f"{model_id}: backend già attivo e responsivo (rilevato esternamente).")
                 self._idle_since.pop(model_id, None)
+                # 2026-09-05: stesso motivo del blocco gemello dopo l'health
+                # check dell'avvio fresco sotto — questo è il percorso PIÙ
+                # comune in steady-state (il backend risulta già attivo alla
+                # quasi totalità dei controlli), quindi il posto più
+                # frequente in cui scoprire un PID mai catturato finora (es.
+                # un backend partito prima che questo fix esistesse, o senza
+                # self-reporting).
+                if os.name == 'nt' and self._read_pid_file(model_id) is None:
+                    window_pid = self._discover_pid_by_window_title(model_id)
+                    if window_pid is not None:
+                        self._write_pid_file_for(model_id, window_pid)
                 return True
 
             proc = self._procs.get(model_id)
@@ -415,6 +426,25 @@ class ModelProcessManager:
 
         if not success:
             logger.error(f"{model_id}: timeout health check ({max_wait}s)")
+            return False
+
+        # 2026-09-05: scoperta universale del PID via titolo finestra (vedi
+        # _discover_pid_by_window_title) — copre ogni backend, non solo
+        # quelli con self-reporting esplicito nel proprio script. Solo se
+        # il backend non si è già auto-riportato da sé (self-reporting,
+        # quando esiste, resta preferito — più preciso, cattura il PID del
+        # processo backend invece del cmd.exe che lo racchiude). A questo
+        # punto il backend ha già passato l'health check quindi la finestra
+        # esiste di sicuro — nessun retry necessario.
+        if os.name == 'nt' and self._read_pid_file(model_id) is None:
+            window_pid = self._discover_pid_by_window_title(model_id)
+            if window_pid is not None:
+                self._write_pid_file_for(model_id, window_pid)
+            else:
+                logger.warning(
+                    f"{model_id}: nessun PID scoperto via titolo finestra dopo l'health "
+                    f"check — _kill_proc ricadrà sul fallback (proc.poll())."
+                )
         return success
 
     def mark_idle(self, model_id: str):
@@ -464,6 +494,70 @@ class ModelProcessManager:
             pid_path.unlink(missing_ok=True)
         except Exception:
             pass
+
+    def _discover_pid_by_window_title(self, model_id: str) -> "int | None":
+        """Scoperta universale del PID via titolo finestra (2026-09-05,
+        Roberto: "aria non può salvare il titolo finestra e il PID in un
+        file quando starta i backend?") — alternativa al self-reporting
+        che serve SOLO per i backend toccati a mano uno per uno
+        (flux2-klein-4b, qwen3-14b-q4km oggi). Questa funzione copre
+        QUALUNQUE backend, incluso whisperx/fish-speech/qwen3-tts/acestep/
+        qwen3-asr/qwen3.5-moe, senza bisogno di modificarne il codice: gira
+        lato orchestratore, interroga tasklist per lo stesso titolo già
+        usato ovunque nel file ("ARIA Backend: {model_id}").
+
+        Nota architetturale importante: il PID trovato così è quello di
+        cmd.exe (il processo che POSSIEDE la finestra — è lui ad averla
+        aperta con 'start "titolo" cmd.exe /k ...'), non quello del
+        backend vero (che gira come SUO figlio). Questo è un vantaggio, non
+        un limite: un taskkill /T su questo PID termina insieme sia il
+        backend sia la finestra che lo contiene, in un colpo solo — niente
+        bisogno del secondo taskkill per titolo che _kill_proc fa oggi
+        subito dopo. Il self-reporting resta preferito quando esiste
+        (_read_pid_file guarda prima quello): cattura il processo del
+        backend stesso un istante dopo la sua creazione, questa invece
+        dipende da un tasklist riuscito e da un titolo finestra univoco.
+
+        Ritorna None su qualunque errore o se nessuna finestra corrisponde
+        (mai un'eccezione al chiamante — chi chiama deve poter continuare
+        comunque col comportamento attuale se la scoperta fallisce)."""
+        if os.name != 'nt':
+            return None
+        title = f"ARIA Backend: {model_id}"
+        try:
+            r = subprocess.run(
+                f'tasklist /FI "WINDOWTITLE eq {title}*" /FO CSV /NH',
+                shell=True, capture_output=True, timeout=5, text=True,
+            )
+            out = (r.stdout or "").strip()
+            if r.returncode != 0 or not out or out.upper().startswith("INFO:"):
+                # "INFO: No tasks..." è l'output normale di tasklist quando
+                # nessuna finestra corrisponde — non un errore da loggare.
+                return None
+            # Formato CSV: "Image Name","PID","Session Name","Session#","Mem Usage"
+            first_row = out.splitlines()[0]
+            fields = [f.strip('"') for f in first_row.split('","')]
+            return int(fields[1])
+        except Exception:
+            logger.exception(f"{model_id}: errore scoprendo il PID via titolo finestra")
+            return None
+
+    def _write_pid_file_for(self, model_id: str, pid: int) -> None:
+        """Come write_pid_file() nei singoli backend (vedi flux_imagegen/
+        server.py, lifelog_llm/launcher.py), ma chiamata lato orchestratore
+        per un PID scoperto via _discover_pid_by_window_title invece che
+        auto-riportato dal backend stesso. Usa lo stesso psutil già
+        importato qui (mai il problema "psutil disponibile nell'env del
+        backend?" che i singoli launcher devono gestire con un try/except —
+        l'orchestratore ha sempre psutil, è già una sua dipendenza)."""
+        pid_path = self.aria_root / "logs" / "pids" / f"{model_id}.pid"
+        try:
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            create_time = psutil.Process(pid).create_time()
+            pid_path.write_text(json.dumps({"pid": pid, "create_time": create_time}))
+            logger.info(f"{model_id}: PID scoperto via titolo finestra e salvato ({pid}).")
+        except Exception:
+            logger.exception(f"{model_id}: errore salvando il PID scoperto {pid}")
 
     def _kill_proc(self, model_id: str):
         """Termina il processo di un singolo modello se attivo.
