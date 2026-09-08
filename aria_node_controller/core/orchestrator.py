@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import time
 import requests
@@ -1415,15 +1416,32 @@ class NodeOrchestrator:
 
 
     def _process_lifelog_llm_task(self, task, start_t: float):
-        """Dispatch di un task LLM enrichment verso LifelogLLMBackend (Qwen3-14B Q4_K_M, porta 8090)."""
-        if not self._lifelog_llm_backend:
+        """Dispatch di un task LLM enrichment verso LifelogLLMBackend (Qwen3-14B Q4_K_M, porta 8090).
+
+        Ricarica il modulo del backend ad ogni task: è stateless e i task LLM sono radi, così
+        un deploy del wrapper (git pull) NON richiede il riavvio dell'orchestratore. Se il reload
+        fallisce si ricade sull'istanza creata all'avvio (comportamento precedente).
+        """
+        backend = self._lifelog_llm_backend
+        try:
+            import importlib
+            _mod = (sys.modules.get("backends.lifelog_llm")
+                    or sys.modules.get("aria_node_controller.backends.lifelog_llm"))
+            if _mod is not None:
+                importlib.reload(_mod)
+                backend = _mod.LifelogLLMBackend()
+        except Exception as e:
+            logger.warning("LifelogLLM: reload modulo fallito, uso l'istanza di avvio: %s", e)
+            backend = self._lifelog_llm_backend
+
+        if not backend:
             raise RuntimeError("LifelogLLMBackend non disponibile.")
 
         if not self.process_manager.ensure_running(task.model_id):
             raise RuntimeError(f"Impossibile avviare il backend Lifelog LLM per {task.model_id}")
 
         try:
-            result_data = self._lifelog_llm_backend.run(
+            result_data = backend.run(
                 payload=task.payload,
                 aria_root=ARIA_ROOT,
                 local_ip=self.local_ip,
