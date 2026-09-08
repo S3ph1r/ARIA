@@ -87,7 +87,7 @@
     "qwen3-14b-q4km": {
       "metadata": {
         "display_name": "Qwen3-14B Q4_K_M",
-        "description": "LLM testuale denso per enrichment Lifelog2. 14B param, 9GB VRAM, 7GB headroom KV cache. Ottimale per trascrizioni lunghe. Avviato via llama-server.exe (prebuilt CUDA 13.1, sm_120).",
+        "description": "LLM testuale denso per enrichment Lifelog2 (unico consumatore). 14B dense, Q4_K_M. ~10.8 GB VRAM con ctx 32768 + KV q8_0 + parallel 1. llama-server.exe b10819 (CUDA 13.3, sm_120). Parametri configurabili e profili thinking/non-thinking: vedi 'llm_contract'.",
         "capabilities": [
           "chat",
           "summarization",
@@ -100,18 +100,78 @@
       "startup_wait": 600,
       "env_prefix": "envs/lifelog-llm",
       "script": "backends/lifelog_llm/launcher.py",
-      "args": [
-        "-m",
-        "data/assets/models/Qwen3-14B-Q4_K_M/Qwen3-14B-Q4_K_M.gguf",
-        "--port",
-        "8090",
-        "--host",
-        "0.0.0.0",
-        "--n-gpu-layers",
-        "-1",
-        "--ctx-size",
-        "16384"
-      ]
+      "server_args": {
+        "model": "data/assets/models/Qwen3-14B-Q4_K_M/Qwen3-14B-Q4_K_M.gguf",
+        "host": "0.0.0.0",
+        "port": 8090,
+        "n-gpu-layers": -1,
+        "ctx-size": 32768,
+        "cache-type-k": "q8_0",
+        "cache-type-v": "q8_0",
+        "parallel": 1,
+        "flash-attn": "on",
+        "jinja": true,
+        "reasoning-format": "deepseek",
+        "no-context-shift": true
+      },
+      "llm_contract": {
+        "contract_version": 1,
+        "model": {
+          "family": "qwen3",
+          "name": "Qwen3-14B",
+          "quant": "Q4_K_M",
+          "hf_source": "unsloth/Qwen3-14B-GGUF",
+          "llama_server_build": "b10819",
+          "context_window_tokens": 32768,
+          "kv_cache": "q8_0"
+        },
+        "defaults": {
+          "profile": "non_thinking",
+          "max_tokens": 4096,
+          "stream": false
+        },
+        "unknown_param_policy": "forward_warn",
+        "profiles": {
+          "non_thinking": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.0,
+            "chat_template_kwargs": { "enable_thinking": false },
+            "reasoning_budget_tokens": 0
+          },
+          "thinking": {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "chat_template_kwargs": { "enable_thinking": true },
+            "reasoning_budget_tokens": 2048,
+            "reasoning_reserve_tokens": 2048
+          }
+        },
+        "request_params": {
+          "max_tokens":              { "type": "int",    "min": 1, "max": 32768 },
+          "temperature":             { "type": "number", "min": 0.0, "max": 2.0 },
+          "top_p":                   { "type": "number", "min": 0.0, "max": 1.0 },
+          "top_k":                   { "type": "int",    "min": 0 },
+          "min_p":                   { "type": "number", "min": 0.0, "max": 1.0 },
+          "presence_penalty":        { "type": "number", "min": -2.0, "max": 2.0 },
+          "frequency_penalty":       { "type": "number", "min": -2.0, "max": 2.0 },
+          "repeat_penalty":          { "type": "number", "min": 0.0 },
+          "repeat_last_n":           { "type": "int",    "min": -1 },
+          "seed":                    { "type": "int" },
+          "stop":                    { "type": "array" },
+          "samplers":                { "type": "array" },
+          "reasoning_budget_tokens": { "type": "int",    "min": -1, "aliases": ["thinking_budget_tokens"] },
+          "chat_template_kwargs":    { "type": "object", "deep_merge": true },
+          "response_format":         { "type": "object" },
+          "json_schema":             { "type": "object" },
+          "grammar":                 { "type": "string" },
+          "ignore_eos":              { "type": "boolean" },
+          "logit_bias":              { "type": "object" }
+        }
+      }
     },
     "sox": {
       "metadata": {

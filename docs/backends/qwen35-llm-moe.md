@@ -1,5 +1,14 @@
 # ARIA Hybrid LLM Gateway — Technical Guide
 
+> ⚠️ **PIANO MAI REALIZZATO (nota 2026-09-09).** Il backend `qwen3.5-35b-moe-q3ks` descritto
+> qui è **solo scaffolding**: manifest + `model_registry.json` + uno script wrapper esistono, ma
+> i pesi non sono mai stati scaricati su PC139 (`data/assets/models/Qwen3.5-35B-A3B-GGUF/` non
+> esiste, `FileNotFoundError` all'avvio) — verificato dal vivo, vedi
+> `docs/qwen3-llm-wrapper-investigation-2026-09-08.md` §5. L'LLM locale **reale** in produzione
+> è `qwen3-14b-q4km` (unico consumatore: Lifelog2) — vedi
+> `docs/qwen3-llm-wrapper-redesign-2026-09-08.md`. Questo documento descrive un'architettura
+> pianificata, non lo stato del sistema.
+
 Questa documentazione descrive l'architettura ibrida di ARIA per l'inferenza testuale, che permette di alternare dinamicamente tra **modelli locali ad alte prestazioni (GPU)** e **modelli cloud ultra-rapidi (Google Gemini)**.
 
 ---

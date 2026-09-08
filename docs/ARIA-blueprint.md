@@ -337,13 +337,13 @@ class BaseBackend(ABC):
 | `tts` | `fish-s1-mini` | 4GB | fish-speech (nativo) | WAV mono 44.1kHz |
 | `tts` | `qwen3-tts-1.7b` | 5GB | transformers (nativo) | WAV mono 24kHz |
 | `tts` | `qwen3-tts-custom` | 6GB | transformers (nativo) | WAV mono 24kHz |
-| `llm` | `qwen3.5-35b-moe-q3ks` | 13GB (q3) | llama-server.exe | text (thinking) |
+| `llm` | `qwen3.5-35b-moe-q3ks` | — | ⚠️ solo scaffolding, mai deployato (pesi assenti) | vedi `docs/qwen3-llm-wrapper-investigation-2026-09-08.md` §5 |
 | `llm` | `gemini-flash-lite` | Cloud | Google Gateway | text |
 | `mus` | `acestep-1.5-xl-sft` | 8 GB | ACE-Step DiT XL (wrapper 8084) | WAV 44.1kHz stereo |
 | `mus` | `audiocraft-medium` | 4-6 GB | AudioGen / MusicGen (wrapper 8086) | WAV 44.1kHz stereo |
 | `stt` | `whisperx-large-v3` | 10 GB | WhisperX + pyannote + wespeaker (porta 8091) | JSON: transcript + speaker turns (con avg_logprob/no_speech_prob) + voiceprint 256d + transcription_quality |
 | `stt` | `qwen3-asr-1.7b` | 9 GB | Qwen3-ASR + ForcedAligner + pyannote (porta 8087, ⏸️ standby) | JSON: transcript + speaker turns + voiceprint 256d |
-| `llm` | `qwen3-14b-q4km` | 9 GB | llama-server.exe GGUF (porta 8090, Lifelog2) | JSON: MemoryAtom (summary, topics, entities, speaker_turns_annotated) |
+| `llm` | `qwen3-14b-q4km` | ~10.8 GB (ctx 32768 + KV q8) | llama-server.exe b10819 (porta 8090, **unico consumatore: Lifelog2**) | testo / JSON — dipende dal prompt del chiamante. Profili `thinking`/`non_thinking` + parametri configurabili: contratto `llm_contract` nel manifest, wrapper `backends/lifelog_llm.py`. Vedi `docs/qwen3-llm-wrapper-redesign-2026-09-08.md` |
 
 > **Critico per nuovi backend STT/LLM:** ogni nuovo `model_id` deve essere aggiunto alla lista `model_logic_ids` nel metodo `_run_loop()` di `orchestrator.py`. ARIA scansiona Redis solo per i model IDs in questa lista — se manca, la coda è invisibile e i task restano bloccati indefinitamente. Non è auto-discovery, è un registro hardcoded.
 

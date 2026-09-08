@@ -16,9 +16,11 @@ $MODEL_DIR   = "$AriaRoot\data\assets\models\Qwen3-14B-Q4_K_M"
 $LLAMA_DIR   = "$AriaRoot\tools\llama"
 $LOG_PATH    = "$AriaRoot\logs\install_lifelog_llm.log"
 
-# llama.cpp b9119, CUDA 13.1 build (includes sm_120 for RTX 5060 Ti)
-$LLAMA_BUILD = "b9119"
-$LLAMA_ZIP   = "llama-$LLAMA_BUILD-bin-win-cuda-13.1-x64.zip"
+# llama.cpp b10819, CUDA 13.3 build (sm_120 per RTX 5060 Ti). Combacia con driver 610.88
+# / CUDA UMD 13.3 e il toolkit di sistema 13.2. b10819 non ha un build cuda-13.1.
+# Redesign wrapper 2026-09-09: vedi docs/qwen3-llm-wrapper-redesign-2026-09-08.md
+$LLAMA_BUILD = "b10819"
+$LLAMA_ZIP   = "llama-$LLAMA_BUILD-bin-win-cuda-13.3-x64.zip"
 $LLAMA_URL   = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/$LLAMA_ZIP"
 
 function Log($msg) {
@@ -99,8 +101,10 @@ if (Test-Path "$LLAMA_DIR\llama-server.exe") {
 
 Log ""
 Log "=== Setup completato ==="
-Log "Test manuale server:"
-Log "  $LLAMA_DIR\llama-server.exe -m $gguf --port 8089 --host 0.0.0.0 --n-gpu-layers -1 --ctx-size 16384"
+Log "Test manuale server (stessi flag del manifest 'server_args' di qwen3-14b-q4km):"
+Log "  $LLAMA_DIR\llama-server.exe -m $gguf --host 0.0.0.0 --port 8090 --n-gpu-layers -1 ``"
+Log "    --ctx-size 32768 --cache-type-k q8_0 --cache-type-v q8_0 --parallel 1 --flash-attn on ``"
+Log "    --jinja --reasoning-format deepseek --no-context-shift"
 Log ""
 Log "Health check (dopo avvio):"
-Log "  curl http://localhost:8089/health"
+Log "  curl http://localhost:8090/health"

@@ -191,7 +191,13 @@ class ModelProcessManager:
             return {}
 
     def _build_cmd(self, model_id: str) -> list:
-        """Costruisce il comando di avvio per il modello dato basandosi sul Manifest."""
+        """Costruisce il comando di avvio per il modello dato basandosi sul Manifest.
+
+        Ricarica il manifest da disco ad ogni chiamata: i backend si avviano di rado
+        (cold start ~ogni 45min al massimo), e così modificare `server_args`/`args`/
+        `llm_contract` NON richiede il riavvio dell'orchestratore — basta il deploy del file.
+        """
+        self.MODEL_CONFIGS = self._load_manifest()
         cfg = self.MODEL_CONFIGS.get(model_id)
         if not cfg:
             raise ValueError(f"Nessuna configurazione trovata nel manifest per model_id='{model_id}'")
@@ -217,15 +223,27 @@ class ModelProcessManager:
         # 3. Costruzione comando base
         cmd = [python, script_abs]
 
-        # 4. Aggiunta Argomenti (con risoluzione macro per path se necessario)
-        args_raw = cfg.get("args", [])
-        for arg in args_raw:
-            # Se l'argomento sembra un path relativo ad ARIA, lo risolviamo
-            # Cerchiamo pattern che iniziano con cartelle note
-            if arg.startswith(("data/", "aria_node_controller/", "envs/")):
-                cmd.append(str(self.aria_root / arg))
-            else:
-                cmd.append(arg)
+        def _resolve(val: str) -> str:
+            # Se il valore sembra un path relativo ad ARIA, lo risolviamo su aria_root
+            if isinstance(val, str) and val.startswith(("data/", "aria_node_controller/", "envs/")):
+                return str(self.aria_root / val)
+            return str(val)
+
+        # 4a. Argomenti — lista piatta (retrocompat: fish/acestep/audiocraft/...)
+        for arg in cfg.get("args", []):
+            cmd.append(_resolve(arg))
+
+        # 4b. server_args — dict {flag: valore} (nuovo, usato da qwen3-14b-q4km).
+        #     bool True  -> flag nudo (--jinja)
+        #     bool False / None -> omesso
+        #     altro      -> --flag valore  (path risolti su aria_root)
+        for key, val in cfg.get("server_args", {}).items():
+            if val is False or val is None:
+                continue
+            cmd.append(f"--{key}")
+            if val is True:
+                continue
+            cmd.append(_resolve(val))
 
         return cmd
 
@@ -1420,9 +1438,10 @@ class NodeOrchestrator:
                 status="done",
                 processing_time_seconds=duration_s,
                 output={
-                    "text":     result_data["text"],
-                    "thinking": result_data.get("thinking"),
-                    "usage":    result_data.get("usage"),
+                    "text":          result_data["text"],
+                    "thinking":      result_data.get("thinking"),
+                    "usage":         result_data.get("usage"),
+                    "finish_reason": result_data.get("finish_reason"),
                 },
             )
             self.qm.post_result(task, result)

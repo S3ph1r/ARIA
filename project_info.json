@@ -1,0 +1,7 @@
+{
+  "name": "ARIA",
+  "description": "Adaptive Resource for Inference and AI \u2014 piattaforma di inferenza AI privata su GPU. Codebase su CT190, runtime PC139 (RTX 5060 Ti). Backend JIT via code Redis CT120.",
+  "created_at": "2026-09-08T20:44:42.680621",
+  "last_active": "2026-09-08T22:45:00.602029",
+  "nh_version": "1.0"
+}
