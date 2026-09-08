@@ -2,9 +2,9 @@
 
 **Data**: 2026-09-08 · **rev**: 2026-09-09 (§8 verifica empirica ESEGUITA — risultati in §8)
 **Segue**: `qwen3-llm-wrapper-investigation-2026-09-08.md` (indagine — stato reale, bug, matematica KV)
-**Stato**: **implementazione lato CT190 FATTA** (§9 passi 3-5, 7 — 2026-09-09). 16 test offline
-passati. **ARIA su PC139 ancora intatta** (b9119, niente pushato, niente riavviato). Restano:
-`core/llm.py` di Lifelog2 (Roberto), swap binario + deploy (§9 passi 6, 9).
+**Stato**: **ARIA lato DEPLOYATO su PC139** (2026-09-09) — binario b10819 + wrapper + manifest,
+senza riavvio orchestratore (hot-reload). 16 test offline passati, validato end-to-end.
+**Resta solo `core/llm.py` di Lifelog2** (§9 passo 6) → handoff `qwen3-14b-backend-spec-2026-09-09.md`.
 **Non-goal**: cambio modello. Resta `Qwen3-14B-Q4_K_M` (unsloth GGUF).
 
 Chiamante unico verificato: `AriaLLMClient` in `sviluppi/Lifelog2/src/backend/lifelog2/core/llm.py`
@@ -333,12 +333,10 @@ ripristinato.
 - `chat_template_kwargs` deep-merge vs replace lato llama-server.
 - `json_schema` (più stringente di `json_object`).
 
-## 9. Piano di implementazione — §8 fatta, si può scrivere il wrapper
+## 9. Piano di implementazione — ARIA lato deployato, resta Lifelog2
 
-1. **Binario** (già in `tools\llama-b10819\` su PC139): su ok di Roberto —
-   `ren tools\llama\llama-server.exe llama-server.b9119.exe` → estrarre il pacchetto b10819
-   completo in `tools\llama\` (sovrascrive le DLL) → aggiornare `$LLAMA_BUILD="b10819"` e
-   `$LLAMA_ZIP="...cuda-13.3..."` in `install_lifelog_llm.ps1`. Rollback = rinominare indietro.
+1. ✅ **FATTO** — Binario: `tools\llama\` → `tools\llama.b9119\` (backup), `tools\llama-b10819\` →
+   `tools\llama\`. `install_lifelog_llm.ps1` aggiornato a `b10819`/`cuda-13.3`. Rollback = `ren` inverso.
 2. ~~Verifica §8~~ — **FATTA** (risultati sopra).
 3. ✅ **FATTO** — `backends_manifest.json`: `server_args` (dict) + `llm_contract` (19 `request_params`,
    2 profili), rimosso `args`. Altri backend intatti. JSON valido.
@@ -348,15 +346,17 @@ ripristinato.
    deep-merge `chat_template_kwargs`, validazione+clamp dal contratto, alias
    `thinking_budget_tokens`, greedy guard, `unknown_param_policy`, `finish_reason` in output,
    `contract()` + `probe()`. `_process_lifelog_llm_task` propaga `finish_reason`.
-6. ⏳ `core/llm.py` (Lifelog2) — Roberto: stop forzatura `temperature`; `CONTEXT_WINDOW_TOKENS` → 32768;
-   `_THINKING_RESERVE_TOKENS` = `reasoning_budget_tokens` del profilo; consuma `finish_reason`;
-   decidi quali chiamate passano a `thinking: true`.
-7. ✅ **FATTO** — `tests/test_lifelog_llm_wrapper.py`: 16 test offline (no GPU), tutti passati
-   (pytest + standalone). ⏳ spot-check qualità KV q8 su dump Stage D reale — a deploy.
-8. ✅ `docs/ARIA-blueprint.md` tabella modelli aggiornata (14b + 35b scaffolding). Wiki NH-Mini
-   già allineata (log `[2026-09-08] lint`). ⏳ `docs/backends/qwen35-llm-moe.md` "mai realizzato".
-9. ⏳ **Deploy** (su ok di Roberto): swap binario `tools\llama\` (§7), push da CT190,
-   `git pull` PC139, restart backend.
+6. ⏳ `core/llm.py` (Lifelog2) — **prossima sessione**: stop forzatura `temperature`;
+   `CONTEXT_WINDOW_TOKENS` → 32768; `_THINKING_RESERVE_TOKENS` = `reasoning_budget_tokens` del
+   profilo; consuma `finish_reason`; decidi quali chiamate passano a `thinking: true`.
+   **Handoff: `docs/qwen3-14b-backend-spec-2026-09-09.md`.**
+7. ✅ **FATTO** — `tests/test_lifelog_llm_wrapper.py`: 16 test offline, tutti passati. ⏳ spot-check
+   qualità KV q8 su dump Stage D reale.
+8. ✅ `docs/ARIA-blueprint.md` + `docs/backends/qwen35-llm-moe.md` ("piano mai realizzato"). Wiki
+   NH-Mini allineata (log `[2026-09-08] lint`).
+9. ✅ **DEPLOY FATTO (2026-09-09)** — commit `baa917e` + `4bc78df`, `git pull` PC139, binario
+   swappato. **Nessun riavvio orchestratore**: `_build_cmd` ricarica il manifest,
+   `_process_lifelog_llm_task` ricarica il modulo backend, ad ogni task. Validato end-to-end.
 
 ## 10. Decisioni
 
