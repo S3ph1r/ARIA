@@ -19,9 +19,15 @@ echo   [Qwen3 task] -> Qwen3 TTS :8083
 echo   [ACE-Step]   -> ACE-Step XL :8084
 echo.
 
-echo [1/1] Pulizia processi Python precedenti (zombie prevention)...
-taskkill /F /IM python.exe >nul 2>&1
-taskkill /F /IM python3.exe >nul 2>&1
+echo [1/1] Pulizia processi ARIA precedenti (zombie prevention)...
+REM 2026-09-24 (Gap A1-6, vedi docs/aria-state-of-gaps.md): prima qui c'era
+REM "taskkill /F /IM python.exe" senza alcun filtro — uccideva OGNI python.exe
+REM sul sistema, incluso qualunque script Python indipendente in esecuzione
+REM (es. il watchdog di un altro progetto). Ora colpisce solo i processi
+REM Python la cui command line referenzia %ARIA_ROOT% (qualunque script sotto
+REM aria_node_controller/backends/dashboard) — stesso effetto di pulizia
+REM zombie per ARIA, zero impatto su python.exe estranei.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'python3.exe') -and $_.CommandLine -like ('*' + $Env:ARIA_ROOT + '*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 2 >nul
 
 echo [2/3] Sincronizzazione Warehouse (Allineamento Modelli)...

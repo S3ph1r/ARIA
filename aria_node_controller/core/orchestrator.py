@@ -304,10 +304,17 @@ class ModelProcessManager:
                 # frequente in cui scoprire un PID mai catturato finora (es.
                 # un backend partito prima che questo fix esistesse, o senza
                 # self-reporting).
+                # 2026-09-24: passa da _discover_pid_by_window_title() diretto
+                # a _get_tracked_pid(), che prova PRIMA self._procs[model_id]
+                # (il Popen che questo stesso orchestratore ha spawnato — ora
+                # sempre corretto, vedi _ensure_single sotto) — la scoperta
+                # via titolo resta solo per un backend rimasto vivo da un
+                # riavvio precedente dell'orchestratore, mai tracciato in
+                # questa sessione.
                 if os.name == 'nt' and self._read_pid_file(model_id) is None:
-                    window_pid = self._discover_pid_by_window_title(model_id)
-                    if window_pid is not None:
-                        self._write_pid_file_for(model_id, window_pid)
+                    tracked_pid = self._get_tracked_pid(model_id)
+                    if tracked_pid is not None:
+                        self._write_pid_file_for(model_id, tracked_pid)
                 return True
 
             proc = self._procs.get(model_id)
@@ -392,15 +399,40 @@ class ModelProcessManager:
                     env["ARIA_MINIO_SECRET_KEY"] = config_manager.MINIO_SECRET_KEY
                     logger.info(f"Injected MinIO credentials for {model_id} (Endpoint: {config_manager.MINIO_ENDPOINT})")
 
-                    # Su Windows, Popen con shell=True e 'start' vuole una stringa dove:
-                    # 1. 'start' vuole il titolo tra virgolette
-                    # 2. 'cmd /k' vuole il comando. Se il comando ha spazi/quote, meglio non wrapparlo
-                    #    ulteriormente se i singoli pezzi sono già corretti.
+                    # 2026-09-24 (Gap A1-5, vedi docs/aria-state-of-gaps.md):
+                    # rimosso 'start "title" cmd.exe /k ...' con shell=True.
+                    # Con quel wrapper, new_proc.pid era il processo 'start'
+                    # (muore da solo in pochi secondi) — mai il backend vero.
+                    # Per questo servivano self-reporting via pid-file e
+                    # scoperta via titolo finestra dopo il fatto. Ma Windows
+                    # 11 delega l'allocazione di OGNI nuova console a Windows
+                    # Terminal (WindowsTerminal.exe + OpenConsole.exe, un
+                    # processo separato che possiede la finestra visibile) —
+                    # e un match per titolo può quindi prendere il PID del
+                    # CONTENITORE invece del backend. Confermato dal vivo:
+                    # PID salvato per qwen3-14b-q4km era WindowsTerminal.exe,
+                    # completamente slegato dal vero albero
+                    # cmd.exe→python.exe→llama-server.exe. Un taskkill /T su
+                    # quel PID rischia di abbattere l'intera app terminale
+                    # con qualunque altra finestra/scheda al suo interno.
+                    #
+                    # Fix: spawniamo 'cmd.exe /c' DIRETTAMENTE (niente
+                    # 'start', niente shell=True) con CREATE_NEW_CONSOLE.
+                    # new_proc.pid è così SEMPRE il PID reale di questo
+                    # cmd.exe, restituito da Windows al momento stesso dello
+                    # spawn — nessuna scoperta, nessuna ambiguità, immune a
+                    # quale terminale Windows scelga per renderizzare la
+                    # finestra (self._procs[model_id] lo traccia già sotto).
+                    # '/c' invece di '/k': la finestra si chiude da sola a
+                    # fine processo — niente prompt vuoto da richiudere
+                    # separatamente dopo un kill. Il comando 'title' imposta
+                    # comunque il titolo visibile, invariato per chi legge
+                    # il desktop o per _position_window()/EnumWindows sotto.
                     new_proc = subprocess.Popen(
-                        f'start "{title}" cmd.exe /k {cmd_str}',
-                        shell=True,
+                        ["cmd.exe", "/c", f'title {title} && {cmd_str}'],
                         cwd=process_cwd,
-                        env=env
+                        env=env,
+                        creationflags=subprocess.CREATE_NEW_CONSOLE,
                     )
                 else:
                     # Fallback standard per Linux/Mac (Mantiene i log su file per non sporcare stdout)
@@ -560,10 +592,59 @@ class ModelProcessManager:
             # Formato CSV: "Image Name","PID","Session Name","Session#","Mem Usage"
             first_row = out.splitlines()[0]
             fields = [f.strip('"') for f in first_row.split('","')]
-            return int(fields[1])
+            image_name, pid = fields[0], int(fields[1])
+
+            # 2026-09-24 (Gap A1-5): Windows 11 delega l'allocazione di ogni
+            # nuova console a Windows Terminal — un match per titolo può
+            # restituire il PID del CONTENITORE (WindowsTerminal.exe /
+            # OpenConsole.exe) invece del processo applicativo, se la
+            # finestra è ospitata lì. Un taskkill /T su quel PID abbatte
+            # l'intera app terminale con qualunque altra finestra/scheda al
+            # suo interno. Confermato dal vivo: PID scoperto per
+            # qwen3-14b-q4km era WindowsTerminal.exe, non il backend —
+            # scoperto perché ha chiuso una finestra PowerShell indipendente
+            # (Sniper watchdog) al primo swap successivo. Rifiutiamo
+            # esplicitamente questi image name generici prima di fidarci del
+            # PID: meglio nessun PID (si ricade sul fallback superiore) che
+            # un PID troppo largo.
+            if image_name.lower() in {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}:
+                logger.warning(
+                    f"{model_id}: titolo finestra trovato ma il processo è "
+                    f"{image_name} (contenitore terminale, non il backend) — "
+                    f"scarto, nessun PID salvato."
+                )
+                return None
+            return pid
         except Exception:
             logger.exception(f"{model_id}: errore scoprendo il PID via titolo finestra")
             return None
+
+    def _get_tracked_pid(self, model_id: str) -> "int | None":
+        """PID reale più affidabile noto per questo modello, in ordine di
+        fiducia (2026-09-24, Gap A1-5):
+
+        1. Self-reporting su file (`_read_pid_file`), quando il backend lo
+           implementa — cattura il PID un istante dopo la sua creazione.
+        2. Il Popen tracciato da QUESTO orchestratore (`self._procs`) — dal
+           fix del 2026-09-24 (spawn diretto, niente più wrapper 'start')
+           `proc.pid` è sempre il PID reale del backend, non più quello di
+           uno shell lanciatore morto da tempo. Nessuna chiamata esterna
+           necessaria, nessuna ambiguità col terminale usato per la finestra.
+        3. Scoperta via titolo finestra — SOLO se nessuno dei due precedenti
+           è disponibile: caso residuo di un backend rimasto vivo da un
+           riavvio precedente dell'orchestratore (mai spawnato in questa
+           sessione, quindi assente da `self._procs`). Filtrata contro i
+           processi-contenitore in `_discover_pid_by_window_title`.
+        """
+        pid = self._read_pid_file(model_id)
+        if pid is not None:
+            return pid
+        proc = self._procs.get(model_id)
+        if proc is not None and proc.poll() is None:
+            return proc.pid
+        if os.name == 'nt':
+            return self._discover_pid_by_window_title(model_id)
+        return None
 
     def _write_pid_file_for(self, model_id: str, pid: int) -> None:
         """Come write_pid_file() nei singoli backend (vedi flux_imagegen/
@@ -687,11 +768,25 @@ class ModelProcessManager:
         anche il guscio cmd.exe che lo conteneva. Aggiunto anche un controllo
         esplicito del codice di uscita di ogni taskkill (prima il codice
         dichiarava "terminato" incondizionatamente, senza controllare se il
-        comando fosse davvero riuscito)."""
+        comando fosse davvero riuscito).
+
+        2026-09-24 (Gap A1-5): sostituito il solo `_read_pid_file` con
+        `_get_tracked_pid`, che prova anche `self._procs[model_id].pid`
+        prima della scoperta via titolo finestra. Prima di oggi, se un
+        backend non aveva pid-file (self-reporting mancante, es.
+        qwen3-14b-q4km senza psutil nel suo env), questo ramo non faceva
+        NULLA su Windows — nessun kill per PID, si contava solo sulla
+        chiusura per titolo finestra sotto, che dipende a sua volta da un
+        pid-file scritto altrove da _discover_pid_by_window_title() — PID
+        che si è dimostrato dal vivo poter essere quello sbagliato
+        (WindowsTerminal.exe invece del backend, vedi quella funzione).
+        Ora `self._procs[model_id].pid` è sempre valido (spawn diretto,
+        niente più wrapper 'start') e copre questo buco senza dipendere da
+        nessun self-reporting né da nessuna scoperta per titolo."""
         with self._lock:
-            real_pid = self._read_pid_file(model_id)
+            real_pid = self._get_tracked_pid(model_id)
             if real_pid is not None:
-                logger.info(f"{model_id}: terminazione via PID reale {real_pid} (pid-file).")
+                logger.info(f"{model_id}: terminazione via PID reale {real_pid}.")
                 try:
                     if os.name == 'nt':
                         r = subprocess.run(f'taskkill /PID {real_pid} /T /F', shell=True, capture_output=True, timeout=5)

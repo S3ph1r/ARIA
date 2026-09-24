@@ -171,6 +171,16 @@ L'utente (es. il Giocatore sul PC Windows) avvia ARIA in modo ultra-semplificato
 - Apre un terminale CMD nero (`ARIA ORCHESTRATOR`) fondamentale per il monitoraggio visuale real-time dei log.
 - I backend pesanti (Qwen3, Fish, ACE-Step) rimangono inizialmente SPENTI. Verranno accesi dall'Orchestratore (che "spawnerà" nuove finestre terminali visibili) solo all'arrivo del prio task su Redis.
 
+#### 3.1.2 Gestione PID e Terminazione Backend (Windows)
+
+Ogni backend JIT gira in una finestra Console dedicata, visibile sul desktop dell'utente (titolo `"ARIA Backend: {model_id}"`), con i log in tempo reale — questo non cambia mai, indipendentemente da come l'Orchestratore traccia il processo internamente.
+
+**Come viene avviato**: l'Orchestratore spawna il comando direttamente (`subprocess.Popen([...], creationflags=CREATE_NEW_CONSOLE)`), senza passare da uno script intermedio (`start`/`cmd.exe /k`). Questo garantisce che il PID restituito dallo spawn sia **sempre** il PID reale del processo lanciato — nessuna scoperta successiva necessaria, indipendente da quale applicazione Windows scelga per renderizzare la finestra (su Windows 11, di norma Windows Terminal).
+
+**Come viene terminato** (idle timeout 45 min, o cambio modello per esclusività GPU — vedi §7): l'Orchestratore uccide **solo** quel processo per PID esatto (`taskkill /PID {pid} /T /F`), mai un comando generico per nome immagine. Il PID usato è il più affidabile disponibile, in quest'ordine: PID self-riportato su file dal backend stesso (quando implementato) → PID tracciato dall'Orchestratore al momento dello spawn (sempre valido, vedi sopra) → scoperta via titolo finestra come ultima risorsa, per un backend rimasto vivo da un riavvio precedente dell'Orchestratore. Un backend nuovo non richiede modifiche per essere gestito correttamente: il meccanismo è centralizzato nell'Orchestratore e vale per ogni `model_id` del manifest.
+
+Per la storia completa di come si è arrivati a questo design (inclusa una diagnosi dal vivo di come un bersaglio scoperto male potesse coincidere con un processo-contenitore troppo ampio) vedi [aria-state-of-gaps.md](aria-state-of-gaps.md) — Gap A1-5. Per la pulizia "zombie prevention" all'avvio di `aria.bat` (scoping-ata per non toccare processi Python estranei ad ARIA) vedi Gap A1-6 nello stesso documento.
+
 **L'Interfaccia Tray Icon**
 Una volta avviato, in basso a destra (vicino all'orologio di Windows) appare l'icona di ARIA. Cliccando col tasto destro, l'utente ha il controllo totale sulle code, forzando le transizioni del Semaforo:
 

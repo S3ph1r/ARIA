@@ -57,7 +57,7 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 ---
 
 ### A1-5 — Self-reporting PID mancante su quasi tutti i backend (kill silenziosamente inefficace) + finestra Console mai chiusa dopo un kill per PID
-**Stato:** in-progress (deployato su PC 139 il 2026-09-05 — pid-file confermato popolato dal vivo per qwen3-14b-q4km via la scoperta per titolo finestra; chiusura finestra allo swap e coerenza cross-backend ancora da osservare al prossimo swap reale)
+**Stato:** in-progress (fix strutturale scritto il 2026-09-24 su LXC 190, ancora da deployare su PC 139 e verificare dal vivo su uno swap reale — vedi ultimo aggiornamento sotto)
 **Priorità:** alta
 **Scoperto:** 2026-09-05 (Roberto, durante il reprocess storico di Lifelog2 — qwen3-14b-q4km e Flux2/covers in alternanza sulla stessa GPU)
 **Descrizione:** Il self-reporting del PID reale (introdotto 2026-08-15, vedi Gap Risolti sotto) esisteva SOLO per `flux2-klein-4b`. Per qualunque altro backend (qwen3-14b-q4km incluso — il più usato, il modello LLM condiviso da Lifelog2/DIAS), `_kill_proc()` ricade sul vecchio fallback (`proc.poll() is None` sul Popen del lanciatore 'start'), che è quasi sempre falso perché su Windows quel lanciatore muore da solo pochi secondi dopo aver aperto la finestra reale — il comando di kill non parte mai, l'entry viene comunque rimossa dal tracking interno (`_procs.pop`), e ARIA "dimentica" il backend senza mai ucciderlo. Confermato dal vivo sui log di produzione: uno swap "GPU Exclusivity: Termino qwen3-14b-q4km per far posto a flux2-klein-4b" non è mai seguito da nessuna riga di conferma di terminazione, a differenza della direzione opposta (Flux2, che il self-reporting ce l'ha, termina pulito col proprio PID). Rischio concreto: due modelli caricati insieme sulla stessa GPU (qwen3-14b-q4km, ~9GB+7GB KV cache, e Flux2, ~12.8GB) — a seconda della VRAM disponibile, contesa/rallentamento o superamento della capacità.
@@ -72,7 +72,43 @@ Registro gap architetturali e funzionali noti. Ogni entry ha un ID univoco, stat
 **Verificato dal vivo (2026-09-05, dopo il riavvio con il fix):** `logs/pids/qwen3-14b-q4km.pid` popolato correttamente dalla scoperta via titolo finestra (self-reporting del launcher non è mai partito, verosimilmente psutil assente nell'env `lifelog-llm` — il fallback ha coperto correttamente il buco, esattamente come disegnato). PID salvato = quello di `cmd.exe`, confermato via `Get-CimInstance Win32_Process` (albero cmd.exe → python.exe/launcher.py → llama-server.exe). Confermato anche lato Lifelog2 (Redis): nessun messaggio perso durante l'intera finestra di stop/fix/restart — il job in coda al momento dello stop è stato ripescato dal meccanismo di re-push su timeout già esistente (`AriaLLMClient: job consumato senza risposta — re-push`) e completato correttamente dopo il riavvio.
 **Ancora da osservare dal vivo:** un kill/swap reale (qwen3→Flux2 o viceversa) con il fix attivo, per confermare che la finestra si chiuda davvero e non solo il processo.
 
+**Aggiornamento 2026-09-24 (Roberto — scoperta dal vivo, causa radice trovata e corretta):** il fix del 2026-09-05 riduceva il problema ma non lo chiudeva. Durante una sessione normale, uno swap reale flux2-klein-4b → qwen3-14b-q4km ha chiuso una finestra PowerShell **completamente estranea ad ARIA** (il "Sniper watchdog", un progetto indipendente di Roberto sul PC 139, con la propria daemon+viewer). Diagnosi (verificata dal vivo via SSH read-only su PC 139, nessuna modifica: `Get-CimInstance Win32_Process`, lettura pid-file, lettura log orchestratore):
+
+- `envs\lifelog-llm` (l'env di `qwen3-14b-q4km`) non ha `psutil` installato → il self-reporting di `launcher.py` fallisce silenziosamente (solo un warning nel log del *backend*, invisibile nel log dell'orchestratore) → ARIA ricade sempre sulla scoperta via titolo finestra per questo backend.
+- La scoperta via titolo finestra ha salvato PID **29728** in `qwen3-14b-q4km.pid`. Verificato via `Get-CimInstance Win32_Process`: quel PID è **`WindowsTerminal.exe`**, non il backend — il vero albero era `cmd.exe (37028) → python.exe/launcher.py (33844) → llama-server.exe (42072)`, completamente slegato da 29728.
+- Causa: Windows 11 delega l'allocazione di **ogni** nuova console a Windows Terminal (l'app terminale predefinita) — `tasklist /FI "WINDOWTITLE eq ..."` può quindi restituire il PID del contenitore grafico (`WindowsTerminal.exe`/`OpenConsole.exe`) invece del processo applicativo. Un `taskkill /PID {quel_pid} /T /F` al prossimo swap avrebbe abbattuto l'intera applicazione terminale — con qualunque altra finestra/scheda al suo interno, incluso Sniper se ospitato nella stessa istanza.
+- **Non è un fallback "a maglie larghe" nel codice** — verificato riga per riga sul log dell'orchestratore e con un test dal vivo (`tasklist` su un titolo inesistente → correttamente zero risultati, non un dump di tutti i processi): ogni comando eseguito allo swap è scoping-ato per PID esatto o titolo esatto. Il problema è che il *bersaglio* scoperto era quello sbagliato, non il meccanismo di selezione.
+
+**Fix strutturale (2026-09-24, non solo una toppa sull'env `lifelog-llm`):** eliminata la dipendenza da self-reporting/scoperta-per-titolo come UNICA fonte di verità per il PID di avvio.
+- `orchestrator.py::_ensure_single` (spawn Windows): rimosso `start "title" cmd.exe /k ...` con `shell=True`. Ora `subprocess.Popen(["cmd.exe", "/c", f'title {title} && {cmd_str}'], creationflags=subprocess.CREATE_NEW_CONSOLE, ...)` — spawn diretto, `new_proc.pid` è sempre il PID reale del `cmd.exe` che avviamo noi, dato dal sistema operativo al momento dello spawn stesso, indipendente da quale frontend Windows scelga per renderizzare la finestra. `/c` invece di `/k`: la finestra si chiude da sola a fine processo.
+- Nuovo helper `orchestrator.py::_get_tracked_pid(model_id)`: prova in ordine (1) pid-file self-reported, (2) `self._procs[model_id].pid` (ora sempre corretto grazie allo spawn diretto — **funziona per QUALUNQUE backend, zero dipendenza da psutil nel suo env**), (3) scoperta via titolo finestra solo come ultimissima risorsa (backend rimasto vivo da un riavvio precedente dell'orchestratore, mai tracciato in questa sessione). Usato ora sia in `_ensure_single` che in `_kill_proc`.
+- `orchestrator.py::_discover_pid_by_window_title`: aggiunto un filtro esplicito che scarta il PID scoperto se il suo Image Name è `WindowsTerminal.exe`/`OpenConsole.exe`/`conhost.exe` (un contenitore, mai un backend applicativo) — rete di sicurezza per il caso residuo (3) sopra, anche per backend futuri con la stessa lacuna di dipendenze.
+
+**Effetto pratico:** il gap non richiede più di installare `psutil` env per env (non fa comunque male farlo, ma non è più necessario) — la correzione è centralizzata nell'orchestratore e si applica automaticamente a ogni backend che ARIA orchestra, presente o futuro, senza toccarne il codice.
+
+**Ancora da verificare dal vivo:** deploy su PC 139 (`git pull` + riavvio manuale di `aria.bat`) e conferma su uno swap reale che `self._procs[model_id].pid` sia effettivamente quello letto da `_kill_proc` (non più scoperta per titolo) e che nessuna finestra estranea ad ARIA venga toccata.
+
 **Aggiunta correlata (2026-09-05, Roberto): posizione fissa della finestra Console.** Windows/il console host non hanno un modo nativo di fissare la posizione di avvio via riga di comando — le finestre si aprivano sparse per il desktop ad ogni avvio. Aggiunta `_position_window()` in `orchestrator.py`: dopo il primo avvio fresco (mai sul percorso "già attivo", che gira ad ogni health check), usa `EnumWindows`/`GetWindowText`/`SetWindowPos` (ctypes, stdlib, nessuna nuova dipendenza) per trovare la finestra per titolo e spostarla a (0,0). Complessità bassa, pattern Win32 standard. **Non verificabile dalla sessione SSH usata per il deploy** (testato: `EnumWindows` da una sessione Windows diversa da quella interattiva di Roberto non vede le finestre — isolamento per sessione, atteso) — funziona perché il codice reale gira nell'orchestratore, nella STESSA sessione desktop che apre le finestre (stesso motivo per cui il taskkill per titolo funziona altrove in questo file). Da confermare visivamente al prossimo avvio fresco di un backend.
+
+---
+
+### A1-6 — `aria.bat` uccideva ogni `python.exe` del sistema all'avvio (non solo i propri)
+**Stato:** in-progress (fix scritto il 2026-09-24 su LXC 190, ancora da deployare su PC 139)
+**Priorità:** alta
+**Scoperto:** 2026-09-24 (Roberto, durante l'indagine su [[A1-5]] — sintomo iniziale: il watchdog Python di un progetto indipendente sul PC 139, "Sniper", moriva ad ogni avvio di ARIA senza mai essere resuscitato, perché nulla protegge il watchdog stesso una volta ucciso)
+**Descrizione:** `aria.bat`, prima operazione all'avvio ("zombie prevention"), eseguiva:
+```
+taskkill /F /IM python.exe
+taskkill /F /IM python3.exe
+```
+Nessun filtro per command line, titolo finestra o percorso — uccide **ogni** `python.exe`/`python3.exe` in esecuzione sul sistema, di qualunque progetto, non solo quelli di ARIA. Confermato dal vivo correlando i timestamp: `watchdog.log` di Sniper si interrompe di netto esattamente nel secondo in cui `main_tray.py`/`dashboard/server.py` di ARIA vengono ricreati da un riavvio di `aria.bat` — e da quel momento nessun `python.exe` del watchdog risulta più in esecuzione, perché nulla lo resuscita (il watchdog protegge il daemon Sniper, ma nessuno protegge il watchdog).
+**Nota:** distinto da [[A1-5]] — quello riguarda i kill *runtime* (swap/idle-timeout tra backend, già scoping-ati per PID/titolo, solo il *bersaglio* scoperto poteva essere sbagliato). Questo è l'unico punto in tutta la codebase ARIA con un kill genuinamente non filtrato.
+**Fix scritto (2026-09-24):** sostituito con una pulizia scoping-ata via PowerShell, che colpisce solo i `python.exe`/`python3.exe` la cui command line contiene `%ARIA_ROOT%` (qualunque script sotto `aria_node_controller/`, `backends/`, `dashboard/`):
+```powershell
+Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'python3.exe') -and $_.CommandLine -like ('*' + $Env:ARIA_ROOT + '*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+```
+Stesso effetto di pulizia zombie per ARIA, zero impatto su processi Python di altri progetti (Sniper incluso).
+**Ancora da verificare dal vivo:** deploy su PC 139 e conferma che un riavvio di `aria.bat` non tocchi più processi Python estranei.
 
 ---
 
