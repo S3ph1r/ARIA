@@ -428,8 +428,35 @@ class ModelProcessManager:
                     # separatamente dopo un kill. Il comando 'title' imposta
                     # comunque il titolo visibile, invariato per chi legge
                     # il desktop o per _position_window()/EnumWindows sotto.
+                    #
+                    # 2026-09-24, aggiornamento stesso giorno (Roberto — bug
+                    # riprodotto dal vivo subito dopo il fix sopra): il PID
+                    # tracciato era corretto (verificato: `self._procs[model_id]
+                    # .pid` = il vero cmd.exe), il filtro anti-contenitore in
+                    # _discover_pid_by_window_title ha correttamente scartato
+                    # WindowsTerminal.exe, e NESSUN taskkill di ARIA ha preso
+                    # di mira quel PID in tutta la sessione osservata — eppure
+                    # una finestra PowerShell indipendente (Sniper) si è
+                    # comunque chiusa nello stesso istante dello spawn.
+                    # CREATE_NEW_CONSOLE non basta a evitare la delega: Windows
+                    # 11 la applica comunque a QUALUNQUE nuova console allocata
+                    # dal sistema, indipendentemente da come la si richiede —
+                    # e un WindowsTerminal.exe che consolida/rimpiazza finestre
+                    # proprie in modi non prevedibili dall'esterno resta un
+                    # rischio strutturale finché la delega è in gioco, anche
+                    # con un tracking del PID ormai corretto.
+                    # Fix definitivo: invocare esplicitamente 'conhost.exe'
+                    # come eseguibile — richiesta esplicita del console host
+                    # classico, che Windows onora senza ridelegare a Windows
+                    # Terminal (verificato dal vivo su PC 139: spawn di prova
+                    # via conhost.exe → zero nuove istanze WindowsTerminal.exe/
+                    # OpenConsole.exe comparse, albero pulito
+                    # conhost.exe→cmd.exe). La finestra resta visibile con i
+                    # log in tempo reale (richiesto esplicitamente da
+                    # Roberto) — cambia solo l'aspetto (console classica
+                    # invece di una scheda Windows Terminal), non la funzione.
                     new_proc = subprocess.Popen(
-                        ["cmd.exe", "/c", f'title {title} && {cmd_str}'],
+                        ["conhost.exe", "cmd.exe", "/c", f'title {title} && {cmd_str}'],
                         cwd=process_cwd,
                         env=env,
                         creationflags=subprocess.CREATE_NEW_CONSOLE,
@@ -610,7 +637,18 @@ class ModelProcessManager:
             # esplicitamente questi image name generici prima di fidarci del
             # PID: meglio nessun PID (si ricade sul fallback superiore) che
             # un PID troppo largo.
-            if image_name.lower() in {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}:
+            #
+            # 2026-09-24, aggiornamento: 'conhost.exe' rimosso da questo
+            # elenco. Da quando lo spawn invoca esplicitamente conhost.exe
+            # (vedi _ensure_single) invece di lasciare che Windows deleghi a
+            # Windows Terminal, un conhost.exe scoperto qui È il processo
+            # legittimo che abbiamo spawnato noi — un conhost.exe è sempre
+            # dedicato a UNA console, mai condiviso tra finestre/app diverse
+            # come può esserlo WindowsTerminal.exe. Solo quest'ultimo (e il
+            # suo OpenConsole.exe) restano nella lista, per il caso residuo
+            # di un backend avviato prima di questo fix o con la vecchia
+            # delega ancora attiva.
+            if image_name.lower() in {"windowsterminal.exe", "openconsole.exe"}:
                 logger.warning(
                     f"{model_id}: titolo finestra trovato ma il processo è "
                     f"{image_name} (contenitore terminale, non il backend) — "
