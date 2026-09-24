@@ -479,21 +479,24 @@ class ModelProcessManager:
             logger.error(f"{model_id}: timeout health check ({max_wait}s)")
             return False
 
-        # 2026-09-05: scoperta universale del PID via titolo finestra (vedi
-        # _discover_pid_by_window_title) — copre ogni backend, non solo
-        # quelli con self-reporting esplicito nel proprio script. Solo se
-        # il backend non si è già auto-riportato da sé (self-reporting,
-        # quando esiste, resta preferito — più preciso, cattura il PID del
-        # processo backend invece del cmd.exe che lo racchiude). A questo
-        # punto il backend ha già passato l'health check quindi la finestra
-        # esiste di sicuro — nessun retry necessario.
+        # 2026-09-05: scoperta universale del PID (vedi _get_tracked_pid) —
+        # copre ogni backend, non solo quelli con self-reporting esplicito.
+        # A questo punto il backend ha già passato l'health check quindi la
+        # finestra esiste di sicuro — nessun retry necessario.
+        # 2026-09-24 (Gap A1-5): passato da _discover_pid_by_window_title()
+        # diretto a _get_tracked_pid() — qui `self._procs[model_id]` è
+        # appena stato popolato dallo spawn fresco poche righe sopra, quindi
+        # questo è ORA il percorso più comune per ottenere il PID (secondo
+        # livello dell'helper), non più la scoperta via titolo (terzo
+        # livello, usata solo se anche self._procs mancasse per qualche
+        # motivo).
         if os.name == 'nt' and self._read_pid_file(model_id) is None:
-            window_pid = self._discover_pid_by_window_title(model_id)
-            if window_pid is not None:
-                self._write_pid_file_for(model_id, window_pid)
+            tracked_pid = self._get_tracked_pid(model_id)
+            if tracked_pid is not None:
+                self._write_pid_file_for(model_id, tracked_pid)
             else:
                 logger.warning(
-                    f"{model_id}: nessun PID scoperto via titolo finestra dopo l'health "
+                    f"{model_id}: nessun PID tracciabile dopo l'health "
                     f"check — _kill_proc ricadrà sul fallback (proc.poll())."
                 )
         # Posizione fissa (2026-09-05, Roberto): solo qui, al primo avvio
