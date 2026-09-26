@@ -57,3 +57,22 @@ di audio (dentro il tempo reale; decisione Roberto: precisione prima del tempo).
 Nel manifest copiare `env_prefix` e `script` della voce `whisperx-large-v3-v1-riserva` nella voce
 `whisperx-large-v3` e fare `git pull` sul PC 139: l'orchestratore rilegge il manifest a ogni avvio di backend.
 Lifelog riconosce da solo i grezzi senza blocco `v2` (percorso C1 v1).
+
+## [2026-09-27] Filtro del parlato: `silero_recupero` di default
+
+Il VAD Silero ai valori di default di faster-whisper scartava TV e radio in sottofondo (dry run su 138 segmenti:
+Dark Matter 215 → 4 parole, radio dopo il controllo 131 → 9, notturni → 0; ~7.750 s con parole solo nel v1).
+Prova su 17 segmenti (12 di media + 5 con verità a orecchio), `vad_mode`:
+
+| modalità | parole (v1 4.406) | s solo-v1 | frasi inventate | ripetute | ASR s | verità a orecchio |
+|---|---|---|---|---|---|---|
+| silero | 4.372 | 2.850 | 8 | 11 | 319 | 59/4/9 |
+| silero_basso (0.25) | 4.495 | 2.812 | 9 | 16 | 388 | 61/4/5 |
+| nessuno | 5.124 | 2.325 | 50 | 148 | 711 | – (Amara.org, «Grazie per la visione») |
+| pyannote (solo zone pyannote) | 4.896 | 2.382 | 43 | 95 | 645 | 47/7/9 (cambia il testo delle conversazioni) |
+| **silero_recupero** | **5.111** | **2.404** | 61 | 91 | 720 | **59/4/9 (identico a silero)** |
+
+`silero_recupero`: prima passata Silero (conversazioni invariate), seconda passata SOLO sui pezzi dove pyannote sente
+voce e la prima non ha parole (≥1 s), segmenti marcati `recovered`. Le allucinazioni note nei pezzi recuperati o
+ripetute sono tolte da Lifelog (asr_rebuild r3, `hallucinated_segments`: 55 frasi su 870). Costo: trascrizione
+~2× (circa 42 s invece di 19 s per segmento da 5 minuti).

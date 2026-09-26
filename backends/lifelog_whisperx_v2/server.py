@@ -283,7 +283,7 @@ def _f16b64(vec) -> str:
 VAD_MODES = ("silero", "silero_basso", "nessuno", "pyannote", "silero_recupero")
 RECOVER_MIN_S = 1.0          # pezzi di parlato pyannote non trascritti più brevi di così: ignorati
 RECOVER_COVER_PAD_S = 0.3    # margine attorno alle parole della prima passata
-VAD_MODE_DEFAULT = os.getenv("V2_VAD_MODE", "silero")
+VAD_MODE_DEFAULT = os.getenv("V2_VAD_MODE", "silero_recupero")   # decisione 2026-09-27, vedi _asr_nonbatched
 
 
 def _speech_clips(diarize_df, pad_s: float = 0.5, merge_gap_s: float = 1.0) -> list[float]:
