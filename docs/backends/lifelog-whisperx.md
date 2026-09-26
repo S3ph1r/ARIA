@@ -1,5 +1,11 @@
 # Lifelog WhisperX — Backend STT/diarizzazione/voiceprint per ARIA
 
+> **[2026-09-26] Sostituito in produzione da `lifelog_whisperx_v2`** — vedi
+> [lifelog-whisperx-v2.md](lifelog-whisperx-v2.md). Questo backend resta come riserva
+> (`whisperx-large-v3-v1-riserva` nel manifest, mai avviato) fino al riprocesso completo validato.
+> Il resto di questo documento descrive il v1 così com'era.
+
+
 > **Aggiornato**: 2026-08-03
 > **Ambiente**: `%ARIA_ROOT%\envs\lifelog-whisperx` (Python 3.12)
 > **Porta**: 8091
