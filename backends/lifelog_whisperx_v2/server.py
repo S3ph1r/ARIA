@@ -220,6 +220,7 @@ WORD_PAD_MS = 50        # margine attorno a ogni parola per le impronte
 WIN_SIZE_MS = int(os.getenv("V2_WIN_SIZE_MS", "1500"))
 WIN_STEP_MS = int(os.getenv("V2_WIN_STEP_MS", "500"))
 MIN_SPEECH_MS = 500     # sotto questa voce nessuna impronta (come _embed_intervals del v1)
+EMBED_MAX_BATCH = 64    # impronte calcolate a blocchi, vedi _embed_batch_grouped
 
 _ctc_model = None
 _ctc_tok   = None
@@ -265,6 +266,14 @@ def _unload_models():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     logger.info("Models unloaded, VRAM freed.")
+
+
+def _free_vram():
+    """Restituisce al driver la memoria GPU tenuta in cache da torch (misura 2026-09-26: senza,
+    la cache cresce a ogni segmento fino al limite dei 16 GB)."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _f16b64(vec) -> str:
@@ -631,10 +640,14 @@ def _embed_batch_grouped(crops: list[torch.Tensor]) -> list[list[float] | None]:
             for i in idxs:
                 results[i] = _embed_single(crops[i])
             continue
-        truncated = [crops[i][:, :target_len] for i in idxs]
-        embs = _embed_group_same_length(truncated)
-        for i, emb in zip(idxs, embs):
-            results[i] = emb
+        # v2: blocchi da EMBED_MAX_BATCH. Tutte le 600 finestre di un segmento insieme facevano
+        # crescere la cache della GPU di ~2 GB per segmento fino a 15.4/16 GB (misurato 2026-09-26):
+        # a quel punto Windows sposta memoria nella RAM di sistema e tutto rallenta 4-5 volte.
+        for j in range(0, len(idxs), EMBED_MAX_BATCH):
+            part = idxs[j:j + EMBED_MAX_BATCH]
+            embs = _embed_group_same_length([crops[i][:, :target_len] for i in part])
+            for i, emb in zip(part, embs):
+                results[i] = emb
     return results
 
 
@@ -1463,6 +1476,7 @@ def transcribe(req: TranscribeRequest):
 
         t_align = time.perf_counter()
         words, align_fallback = _ctc_words(audio_np, nb_segs)
+        _free_vram()   # le emissioni ctc su 5 min di audio occupano ~3.6 GB che la cache non restituisce
         timing["align"] = round(time.perf_counter() - t_align, 2)
         logger.info("CTC align in %.1fs -- %d parole (fallback=%s)", timing["align"], len(words), align_fallback)
         # forma whisperx per assign_word_speakers/_to_contract del v1: segmenti con parole ctc
@@ -1548,6 +1562,7 @@ def transcribe(req: TranscribeRequest):
         over = _overlap_frames(diarize_segs)
         waveform = torch.from_numpy(audio_np).unsqueeze(0)
         emb_block = _v2_embeddings(waveform, words, over, req.embed_words)
+        _free_vram()
         timing["embed"] = round(time.perf_counter() - t_emb, 2)
         ov_iv = []
         for t in sorted(over):
