@@ -251,8 +251,27 @@
     },
     "whisperx-large-v3": {
       "metadata": {
-        "display_name": "WhisperX large-v3",
-        "description": "Backend STT primario per Lifelog2. WhisperX large-v3 (float16, Blackwell-safe) + wav2vec2 align ITA + pyannote community-1 diarization + wespeaker-resnet34-LM voiceprint 256d.",
+        "display_name": "WhisperX large-v3 (v2)",
+        "description": "Backend STT di Lifelog2 dal 2026-09-26: faster-whisper large-v3 NON batched (beam 5, parola per parola con probabilità) + tempi ctc-forced-aligner + pyannote community-1 grezzo + impronte ResNet293 256d per frase e su finestre. Nessuna identità lato ARIA. Contratto: Lifelog2 docs/lifelog2-asr-v2-contract.md.",
+        "capabilities": [
+          "stt",
+          "diarization",
+          "word-timestamps",
+          "speaker-labels",
+          "voiceprint",
+          "italian"
+        ]
+      },
+      "port": 8091,
+      "health_url": "http://localhost:8091/health",
+      "startup_wait": 150,
+      "env_prefix": "envs/lifelog-whisperx-v2",
+      "script": "backends/lifelog_whisperx_v2/server.py"
+    },
+    "whisperx-large-v3-v1-riserva": {
+      "metadata": {
+        "display_name": "WhisperX large-v3 (v1, riserva)",
+        "description": "RISERVA per tornare indietro (2026-09-26): backend v1 batched. Non è in model_logic_ids, quindi l'orchestratore non lo avvia mai; per ripristinarlo copiare env_prefix e script nella voce whisperx-large-v3.",
         "capabilities": [
           "stt",
           "diarization",
