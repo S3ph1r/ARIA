@@ -1,5 +1,5 @@
 """
-Lifelog WhisperX v2 Server — FastAPI (porta ARIA_PORT, default 8092)
+Lifelog WhisperX v2 Server — FastAPI (porta ARIA_PORT, default 8091: prende il posto del v1)
 
 Nato dal laboratorio 2026-09-25/26 (Lifelog2 docs/lifelog2-asr-v2-contract.md e
 lifelog2-audit-completo.md): il v1 trascrive in modalità batched e perde il 15-18%
@@ -1364,7 +1364,7 @@ def _download_file(url: str, dest: str):
 class TranscribeRequest(BaseModel):
     wav_url:    str
     segment_id: str
-    language:   str = "it"
+    language:   str | None = "it"
     # Vincoli opzionali sul numero di parlanti per la diarizzazione.
     # None = stima automatica di pyannote (comportamento storico).
     min_speakers: int | None = None
@@ -1374,6 +1374,10 @@ class TranscribeRequest(BaseModel):
     exclusive_diarization: bool = False
     # Solo per misura (laboratorio): impronta anche per ogni singola parola.
     embed_words: bool = False
+    # Campi del formato v1 (speaker_turns con impronte per turno, cluster grezzi): servono
+    # solo per confronti col vecchio sistema. Di default no (decisione Roberto 2026-09-26:
+    # un solo sistema; risparmia 10-20 s per segmento).
+    compat_v1: bool = False
 
 
 class VoiceprintRequest(BaseModel):
@@ -1469,8 +1473,11 @@ def transcribe(req: TranscribeRequest):
 
         timing = {}
         t_asr = time.perf_counter()
-        nb_segs = _asr_nonbatched(audio_np, req.language)
-        detected_lang = req.language
+        # Stage C manda language=None: nel v1 whisperx rilevava la lingua da solo; qui si
+        # fissa l'italiano (LANGUAGE) per non far indovinare Whisper su audio rumoroso.
+        lang = req.language or LANGUAGE
+        nb_segs = _asr_nonbatched(audio_np, lang)
+        detected_lang = lang
         timing["asr"] = round(time.perf_counter() - t_asr, 2)
         logger.info("ASR non batched in %.1fs -- %d segmenti", timing["asr"], len(nb_segs))
 
@@ -1545,17 +1552,29 @@ def transcribe(req: TranscribeRequest):
                 logger.info("Diarize: return_embeddings non supportato da questa versione di whisperx")
                 diarize_segs = _diarize_model(audio_np, **diar_kw)
         diarize_stats = _log_diarization_stats(diarize_segs, speaker_embeddings)
-        wx_result = whisperx.assign_word_speakers(diarize_segs, wx_result)
         logger.info("Diarize done in %.1fs", time.perf_counter() - t_diar)
 
         t_vp = time.perf_counter()
-        output = _to_contract(wx_result, audio_np, detected_lang,
-                              speaker_embeddings=speaker_embeddings,
-                              diarize_stats=diarize_stats,
-                              diarize_df=diarize_segs)
-        n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
-        logger.info("Voiceprint done in %.1fs -- %d turns with embedding",
-                    time.perf_counter() - t_vp, n_emb)
+        if req.compat_v1:
+            wx_result = whisperx.assign_word_speakers(diarize_segs, wx_result)
+            output = _to_contract(wx_result, audio_np, detected_lang,
+                                  speaker_embeddings=speaker_embeddings,
+                                  diarize_stats=diarize_stats,
+                                  diarize_df=diarize_segs)
+            n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
+            logger.info("Formato v1 in %.1fs -- %d turns with embedding",
+                        time.perf_counter() - t_vp, n_emb)
+        else:
+            # solo i campi leggeri che Stage C legge (testo, lingua, durata, qualità)
+            lps = [s["avg_logprob"] for s in nb_segs]
+            output = {
+                "transcript": " ".join(s["text"].strip() for s in nb_segs).strip(),
+                "language": detected_lang,
+                "duration_ms": int(len(audio_np) / 16000 * 1000),
+                "speaker_turns": [],
+                "diarization_stats": diarize_stats,
+                "transcription_quality": {"avg_logprob_mean": round(float(np.mean(lps)), 4) if lps else None},
+            }
         timing["diarize"] = round(t_vp - t_diar, 2)
 
         t_emb = time.perf_counter()
@@ -1574,7 +1593,7 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": req.language,
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang,
                 "vad": "faster-whisper default (silero)", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
@@ -1610,17 +1629,12 @@ def transcribe(req: TranscribeRequest):
             os.unlink(wav_path)
 
     elapsed = round(time.perf_counter() - t0, 2)
-    n_emb = sum(1 for t in output["speaker_turns"] if t.get("embedding") is not None)
-    logger.info(
-        "Done %s in %.1fs -- %d chars, %d turns, %d with_embedding",
-        req.segment_id, elapsed,
-        len(output["transcript"]),
-        len(output["speaker_turns"]),
-        n_emb,
-    )
+    logger.info("Done %s in %.1fs -- %d chars, %d parole, compat_v1=%s",
+                req.segment_id, elapsed, len(output["transcript"]),
+                len(output["v2"]["words"]), req.compat_v1)
 
     return {"status": "done", "processing_time": elapsed, "output": output}
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("ARIA_PORT", "8092")), log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("ARIA_PORT", "8091")), log_level="info")

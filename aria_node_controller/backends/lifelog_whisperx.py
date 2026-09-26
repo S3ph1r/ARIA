@@ -71,7 +71,9 @@ class LifelogWhisperXBackend:
             # ricostruito con soli tre campi, quindi qualunque parametro di
             # diarizzazione inviato dal client veniva scartato silenziosamente
             # (scoperto il 2026-07-28: min_speakers non arrivava mai al backend).
-            for opt in ("min_speakers", "max_speakers", "exclusive_diarization"):
+            # compat_v1 / embed_words: opzioni del backend lifelog_whisperx_v2 (2026-09-26),
+            # solo per confronti; il v1 le ignora.
+            for opt in ("min_speakers", "max_speakers", "exclusive_diarization", "compat_v1", "embed_words"):
                 if payload.get(opt) is not None:
                     body[opt] = payload[opt]
             r = requests.post(f"{server_url}/transcribe", json=body, timeout=600)
