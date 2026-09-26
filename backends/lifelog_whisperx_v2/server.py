@@ -280,7 +280,9 @@ def _f16b64(vec) -> str:
     return base64.b64encode(np.asarray(vec, dtype=np.float16).tobytes()).decode("ascii")
 
 
-VAD_MODES = ("silero", "silero_basso", "nessuno", "pyannote")
+VAD_MODES = ("silero", "silero_basso", "nessuno", "pyannote", "silero_recupero")
+RECOVER_MIN_S = 1.0          # pezzi di parlato pyannote non trascritti più brevi di così: ignorati
+RECOVER_COVER_PAD_S = 0.3    # margine attorno alle parole della prima passata
 VAD_MODE_DEFAULT = os.getenv("V2_VAD_MODE", "silero")
 
 
@@ -318,6 +320,32 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
             kw["clip_timestamps"] = clips
         else:
             return []          # pyannote non sente nessuna voce
+    elif vad_mode == "silero_recupero":
+        # 2026-09-27: prima passata come "silero" (conversazioni identiche a quelle verificate a
+        # orecchio), seconda passata SOLO sui pezzi dove pyannote sente voce ma la prima non ha
+        # trascritto nulla — TV e radio in sottofondo che il VAD Silero scarta.
+        first = _asr_nonbatched(audio_np, language, "silero")
+        covered = sorted((w["start"] - RECOVER_COVER_PAD_S, w["end"] + RECOVER_COVER_PAD_S)
+                         for s in first for w in s["wwords"])
+        todo = []
+        for a, b in zip(clips[0::2], clips[1::2]) if clips else []:
+            cur = a
+            for ca, cb in covered:
+                if cb <= cur or ca >= b:
+                    continue
+                if ca > cur:
+                    todo.append((cur, ca))
+                cur = max(cur, cb)
+            if cur < b:
+                todo.append((cur, b))
+        todo = [x for ab in todo if ab[1] - ab[0] >= RECOVER_MIN_S for x in ab]
+        second = _asr_nonbatched(audio_np, language, "pyannote", todo) if todo else []
+        for s in second:
+            s["recovered"] = True
+        merged = sorted(first + second, key=lambda s: s["start"])
+        for k, s in enumerate(merged):
+            s["id"] = k
+        return merged
     else:
         raise ValueError(f"vad_mode sconosciuto: {vad_mode}")
     segs, _info = _model.transcribe(audio_np, language=language, word_timestamps=True, **kw)
@@ -1518,7 +1546,7 @@ def transcribe(req: TranscribeRequest):
         lang = req.language or LANGUAGE
         vad_mode = req.vad_mode or VAD_MODE_DEFAULT
         pre_diar = None
-        if vad_mode == "pyannote":
+        if vad_mode in ("pyannote", "silero_recupero"):
             t_pre = time.perf_counter()
             pre_diar = _diarize_model(audio_np, return_embeddings=True)
             timing["diarize_pre"] = round(time.perf_counter() - t_pre, 2)
@@ -1648,7 +1676,8 @@ def transcribe(req: TranscribeRequest):
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
                               "no_speech_prob": round(s["no_speech_prob"], 4),
                               "compression_ratio": round(s["compression_ratio"], 4),
-                              "temperature": s["temperature"]} for s in nb_segs],
+                              "temperature": s["temperature"],
+                              "recovered": bool(s.get("recovered"))} for s in nb_segs],
             },
             "align_fallback": align_fallback,
             "words": [{"i": w["i"], "seg": w["seg"], "word": w["word"],
