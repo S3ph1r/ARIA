@@ -280,9 +280,47 @@ def _f16b64(vec) -> str:
     return base64.b64encode(np.asarray(vec, dtype=np.float16).tobytes()).decode("ascii")
 
 
-def _asr_nonbatched(audio_np: np.ndarray, language: str) -> list[dict]:
-    """Whisper large-v3 non batched: segmenti con logprob/no_speech reali e parole con probabilità."""
-    segs, _info = _model.transcribe(audio_np, language=language, word_timestamps=True, vad_filter=True)
+VAD_MODES = ("silero", "silero_basso", "nessuno", "pyannote")
+VAD_MODE_DEFAULT = os.getenv("V2_VAD_MODE", "silero")
+
+
+def _speech_clips(diarize_df, pad_s: float = 0.5, merge_gap_s: float = 1.0) -> list[float]:
+    """Zone di parlato di pyannote (unione degli intervalli di tutti i parlanti), allargate di
+    pad_s e fuse se distano meno di merge_gap_s → clip_timestamps [s0, e0, s1, e1, ...]."""
+    iv = sorted((max(0.0, r.start - pad_s), r.end + pad_s) for r in diarize_df.itertuples())
+    out: list[list[float]] = []
+    for a, b in iv:
+        if out and a - out[-1][1] < merge_gap_s:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [x for ab in out for x in ab]
+
+
+def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero",
+                    clips: list[float] | None = None) -> list[dict]:
+    """Whisper large-v3 non batched: segmenti con logprob/no_speech reali e parole con probabilità.
+
+    vad_mode (2026-09-27): "silero" = filtro VAD di faster-whisper ai valori di default (scarta
+    TV/radio in sottofondo: Dark Matter 215 → 4 parole); "silero_basso" = soglia 0.25;
+    "nessuno" = Whisper su tutto l'audio; "pyannote" = Whisper solo nelle zone di parlato di
+    pyannote (clip_timestamps), come faceva di fatto il v1."""
+    kw: dict = {}
+    if vad_mode == "silero":
+        kw["vad_filter"] = True
+    elif vad_mode == "silero_basso":
+        kw.update(vad_filter=True, vad_parameters={"threshold": 0.25, "neg_threshold": 0.15})
+    elif vad_mode == "nessuno":
+        kw["vad_filter"] = False
+    elif vad_mode == "pyannote":
+        kw["vad_filter"] = False
+        if clips:
+            kw["clip_timestamps"] = clips
+        else:
+            return []          # pyannote non sente nessuna voce
+    else:
+        raise ValueError(f"vad_mode sconosciuto: {vad_mode}")
+    segs, _info = _model.transcribe(audio_np, language=language, word_timestamps=True, **kw)
     out = []
     for k, s in enumerate(segs):
         out.append({
@@ -1378,6 +1416,8 @@ class TranscribeRequest(BaseModel):
     # solo per confronti col vecchio sistema. Di default no (decisione Roberto 2026-09-26:
     # un solo sistema; risparmia 10-20 s per segmento).
     compat_v1: bool = False
+    # Filtro del parlato prima di Whisper (vedi _asr_nonbatched); None = V2_VAD_MODE o "silero".
+    vad_mode: str | None = None
 
 
 class VoiceprintRequest(BaseModel):
@@ -1476,7 +1516,14 @@ def transcribe(req: TranscribeRequest):
         # Stage C manda language=None: nel v1 whisperx rilevava la lingua da solo; qui si
         # fissa l'italiano (LANGUAGE) per non far indovinare Whisper su audio rumoroso.
         lang = req.language or LANGUAGE
-        nb_segs = _asr_nonbatched(audio_np, lang)
+        vad_mode = req.vad_mode or VAD_MODE_DEFAULT
+        pre_diar = None
+        if vad_mode == "pyannote":
+            t_pre = time.perf_counter()
+            pre_diar = _diarize_model(audio_np, return_embeddings=True)
+            timing["diarize_pre"] = round(time.perf_counter() - t_pre, 2)
+        nb_segs = _asr_nonbatched(audio_np, lang, vad_mode,
+                                  _speech_clips(pre_diar[0]) if pre_diar is not None else None)
         detected_lang = lang
         timing["asr"] = round(time.perf_counter() - t_asr, 2)
         logger.info("ASR non batched in %.1fs -- %d segmenti", timing["asr"], len(nb_segs))
@@ -1544,6 +1591,8 @@ def transcribe(req: TranscribeRequest):
             )
             diarize_segs["start"] = diarize_segs["segment"].apply(lambda x: x.start)
             diarize_segs["end"]   = diarize_segs["segment"].apply(lambda x: x.end)
+        elif pre_diar is not None and not diar_kw:
+            diarize_segs, speaker_embeddings = pre_diar      # già calcolata per il VAD
         else:
             try:
                 diarize_segs, speaker_embeddings = _diarize_model(
@@ -1593,8 +1642,8 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": lang,
-                "vad": "faster-whisper default (silero)", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode,
+                "vad": "vedi vad_mode", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
                               "no_speech_prob": round(s["no_speech_prob"], 4),
