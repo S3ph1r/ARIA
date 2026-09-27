@@ -76,3 +76,15 @@ Prova su 17 segmenti (12 di media + 5 con verità a orecchio), `vad_mode`:
 voce e la prima non ha parole (≥1 s), segmenti marcati `recovered`. Le allucinazioni note nei pezzi recuperati o
 ripetute sono tolte da Lifelog (asr_rebuild r3, `hallucinated_segments`: 55 frasi su 870). Costo: trascrizione
 ~2× (circa 42 s invece di 19 s per segmento da 5 minuti).
+
+## [2026-09-27] Default: lingua `auto_it_en`, allineamento `frase`
+
+Decisione di Roberto dopo la prova su 22 segmenti e l'ascolto (Lifelog2 `docs/lifelog2-audit-completo.md`, blocco
+13:30 del 2026-09-27):
+- `lang_mode=auto_it_en`: lingua riconosciuta per finestra ma ristretta a italiano/inglese, con `initial_prompt`
+  italiano di contesto; i termini inglesi restano inglesi, ritrovate frasi perse (chiamata delle 03:52).
+- `align_mode=frase`: ctc per frase sulla finestra delle parole di Whisper (±0.5 s), ricaduta sul tempo di Whisper
+  per parola se lo scarto supera 1.5 s. Scarto: p99 1.28 s, 0% oltre 2 s (testo intero: p99 68 s).
+- Il backend manda anche i **pezzi** (frase tagliata ai cambi di etichetta pyannote, con impronta): l'identità la
+  decide Lifelog su questi (asr_rebuild r4).
+Le vecchie modalità restano disponibili per richiesta o variabile d'ambiente (`V2_LANG_MODE`, `V2_ALIGN_MODE`).

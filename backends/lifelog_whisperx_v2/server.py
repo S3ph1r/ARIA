@@ -300,7 +300,7 @@ def _speech_clips(diarize_df, pad_s: float = 0.5, merge_gap_s: float = 1.0) -> l
 
 
 LANG_MODES = ("it", "auto_it_en")
-LANG_MODE_DEFAULT = os.getenv("V2_LANG_MODE", "it")   # "auto_it_en" dopo la prova
+LANG_MODE_DEFAULT = os.getenv("V2_LANG_MODE", "auto_it_en")   # decisione 2026-09-27 (Roberto), dopo la prova su 22 segmenti
 # Contesto iniziale per Whisper (idea di Roberto, 2026-09-27): non forzare l'italiano ma far capire
 # che siamo in ambito italiano, dove termini e contenuti inglesi restano in inglese. Scritto come
 # testo trascritto (Whisper lo prende come «testo precedente», non come istruzione).
@@ -412,7 +412,7 @@ def _whisper_props(seg: dict) -> list[dict]:
 
 
 ALIGN_MODES = ("frase", "testo_intero")
-ALIGN_MODE_DEFAULT = os.getenv("V2_ALIGN_MODE", "testo_intero")   # "frase" dopo la prova
+ALIGN_MODE_DEFAULT = os.getenv("V2_ALIGN_MODE", "frase")   # decisione 2026-09-27 (Roberto), dopo la prova su 22 segmenti
 ALIGN_PHRASE_PAD_S = 0.5     # margine attorno alla frase di Whisper in cui ctc può collocare le parole
 ALIGN_MAX_DEV_S = 1.5        # parola che ctc sposta più di così dal tempo di Whisper → tempo di Whisper
 
