@@ -283,6 +283,13 @@ def _f16b64(vec) -> str:
 VAD_MODES = ("silero", "silero_basso", "nessuno", "pyannote", "silero_recupero")
 RECOVER_MIN_S = 1.0          # pezzi di parlato pyannote non trascritti più brevi di così: ignorati
 RECOVER_COVER_PAD_S = 0.3    # margine attorno alle parole della prima passata
+# 2026-09-27 (dry run su 139 segmenti): con lang_mode auto_it_en la seconda passata su pezzi brevi
+# (mediana 1.1 s) riconosceva «inglese» e inventava frasi fatte («I'll tell the police» ×9 nella radio,
+# «See you later.» al posto di «o almeno di riprovare a riaggiornare»): 583 frasi recuperate in inglese
+# contro 5 con l'italiano forzato. Su un secondo di audio il riconoscimento della lingua non ha senso:
+# i pezzi recuperati più brevi di RECOVER_AUTO_MIN_S vanno in RECOVER_SHORT_LANG, i più lunghi seguono lang_mode.
+RECOVER_AUTO_MIN_S = float(os.getenv("V2_RECOVER_AUTO_MIN_S", "10"))
+RECOVER_SHORT_LANG = os.getenv("V2_RECOVER_SHORT_LANG", "it")    # "" = come lang_mode (comportamento precedente)
 VAD_MODE_DEFAULT = os.getenv("V2_VAD_MODE", "silero_recupero")   # decisione 2026-09-27, vedi _asr_nonbatched
 
 
@@ -365,8 +372,15 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
                 cur = max(cur, cb)
             if cur < b:
                 todo.append((cur, b))
-        todo = [x for ab in todo if ab[1] - ab[0] >= RECOVER_MIN_S for x in ab]
-        second = _asr_nonbatched(audio_np, language, "pyannote", todo, lang_mode=lang_mode) if todo else []
+        todo = [ab for ab in todo if ab[1] - ab[0] >= RECOVER_MIN_S]
+        if RECOVER_SHORT_LANG and lang_mode != "it":
+            short = [x for ab in todo if ab[1] - ab[0] < RECOVER_AUTO_MIN_S for x in ab]
+            long_ = [x for ab in todo if ab[1] - ab[0] >= RECOVER_AUTO_MIN_S for x in ab]
+            second = ((_asr_nonbatched(audio_np, RECOVER_SHORT_LANG, "pyannote", short, lang_mode="it") if short else [])
+                      + (_asr_nonbatched(audio_np, language, "pyannote", long_, lang_mode=lang_mode) if long_ else []))
+        else:
+            flat = [x for ab in todo for x in ab]
+            second = _asr_nonbatched(audio_np, language, "pyannote", flat, lang_mode=lang_mode) if flat else []
         for s in second:
             s["recovered"] = True
         merged = sorted(first + second, key=lambda s: s["start"])
@@ -1798,7 +1812,7 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode,
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode, "recover_short_lang": RECOVER_SHORT_LANG, "recover_auto_min_s": RECOVER_AUTO_MIN_S,
                 "vad": "vedi vad_mode", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
