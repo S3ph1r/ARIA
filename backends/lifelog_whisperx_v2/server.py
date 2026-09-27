@@ -299,8 +299,35 @@ def _speech_clips(diarize_df, pad_s: float = 0.5, merge_gap_s: float = 1.0) -> l
     return [x for ab in out for x in ab]
 
 
+LANG_MODES = ("it", "auto_it_en")
+LANG_MODE_DEFAULT = os.getenv("V2_LANG_MODE", "it")   # "auto_it_en" dopo la prova
+# Contesto iniziale per Whisper (idea di Roberto, 2026-09-27): non forzare l'italiano ma far capire
+# che siamo in ambito italiano, dove termini e contenuti inglesi restano in inglese. Scritto come
+# testo trascritto (Whisper lo prende come «testo precedente», non come istruzione).
+ITALIAN_CONTEXT_PROMPT = ("Allora, ci sentiamo dopo. Ho visto il meeting su YouTube, "
+                          "l'app funziona e il feedback del team è ok.")
+
+
+class _ItEnOnly:
+    """Proxy del modello ctranslate2: il riconoscimento della lingua per finestra sceglie solo
+    fra italiano e inglese (un audio rumoroso non deve diventare spagnolo o portoghese)."""
+    def __init__(self, m):
+        self._m = m
+
+    def __getattr__(self, k):
+        return getattr(self._m, k)
+
+    def detect_language(self, *a, **kw):
+        res = self._m.detect_language(*a, **kw)
+        out = []
+        for langs in res:
+            keep = [x for x in langs if x[0] in ("<|it|>", "<|en|>")] or [("<|it|>", 1.0)]
+            out.append(keep)
+        return out
+
+
 def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero",
-                    clips: list[float] | None = None) -> list[dict]:
+                    clips: list[float] | None = None, lang_mode: str = "it") -> list[dict]:
     """Whisper large-v3 non batched: segmenti con logprob/no_speech reali e parole con probabilità.
 
     vad_mode (2026-09-27): "silero" = filtro VAD di faster-whisper ai valori di default (scarta
@@ -324,7 +351,7 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
         # 2026-09-27: prima passata come "silero" (conversazioni identiche a quelle verificate a
         # orecchio), seconda passata SOLO sui pezzi dove pyannote sente voce ma la prima non ha
         # trascritto nulla — TV e radio in sottofondo che il VAD Silero scarta.
-        first = _asr_nonbatched(audio_np, language, "silero")
+        first = _asr_nonbatched(audio_np, language, "silero", lang_mode=lang_mode)
         covered = sorted((w["start"] - RECOVER_COVER_PAD_S, w["end"] + RECOVER_COVER_PAD_S)
                          for s in first for w in s["wwords"])
         todo = []
@@ -339,7 +366,7 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
             if cur < b:
                 todo.append((cur, b))
         todo = [x for ab in todo if ab[1] - ab[0] >= RECOVER_MIN_S for x in ab]
-        second = _asr_nonbatched(audio_np, language, "pyannote", todo) if todo else []
+        second = _asr_nonbatched(audio_np, language, "pyannote", todo, lang_mode=lang_mode) if todo else []
         for s in second:
             s["recovered"] = True
         merged = sorted(first + second, key=lambda s: s["start"])
@@ -348,6 +375,11 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
         return merged
     else:
         raise ValueError(f"vad_mode sconosciuto: {vad_mode}")
+    if lang_mode == "auto_it_en":
+        if not isinstance(_model.model, _ItEnOnly):
+            _model.model = _ItEnOnly(_model.model)
+        kw.update(multilingual=True, initial_prompt=ITALIAN_CONTEXT_PROMPT)
+        language = language or "it"    # lingua iniziale; poi decide la finestra (it/en)
     segs, _info = _model.transcribe(audio_np, language=language, word_timestamps=True, **kw)
     out = []
     for k, s in enumerate(segs):
@@ -379,32 +411,67 @@ def _whisper_props(seg: dict) -> list[dict]:
     return out
 
 
-def _ctc_words(audio_np: np.ndarray, segs: list[dict]) -> tuple[list[dict], bool]:
-    """Tempi ctc per ogni token di testo, nello stesso ordine di seg['text'].split().
-    Ritorna (parole, fallback): se ctc non restituisce lo stesso numero di token si usano
-    i tempi di Whisper e fallback=True."""
+ALIGN_MODES = ("frase", "testo_intero")
+ALIGN_MODE_DEFAULT = os.getenv("V2_ALIGN_MODE", "testo_intero")   # "frase" dopo la prova
+ALIGN_PHRASE_PAD_S = 0.5     # margine attorno alla frase di Whisper in cui ctc può collocare le parole
+
+
+def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     from ctc_forced_aligner import (generate_emissions, get_alignments, get_spans,
                                     postprocess_results, preprocess_text)
+    em, stride = generate_emissions(
+        _ctc_model, torch.from_numpy(audio).to(_ctc_model.dtype).to(_ctc_model.device), batch_size=8)
+    ts, tx = preprocess_text(text, romanize=True, language=_iso3(LANGUAGE))
+    sg, sc, blank = get_alignments(em, ts, _ctc_tok)
+    return postprocess_results(tx, get_spans(ts, sg, blank), stride, sc)
+
+
+def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> tuple[list[dict], bool]:
+    """Tempi ctc per ogni token di testo, nello stesso ordine di seg['text'].split().
+
+    mode "frase" (default dal 2026-09-27): ctc su ogni frase di Whisper, solo dentro il suo
+    intervallo ±ALIGN_PHRASE_PAD_S. Il vecchio "testo_intero" (tutto il testo su tutti i 5 minuti)
+    su audio con molte pause o media spostava il 5.6% delle parole di oltre 5 s rispetto a Whisper,
+    fino a ~50 s (208c47d7: 97% delle parole): la parola finiva nel momento di un'altra voce.
+    Una frase che ctc non riesce ad allineare (token diversi, errore) usa i tempi di Whisper.
+    Ritorna (parole, fallback) — fallback=True se almeno una frase è ricaduta su Whisper."""
     tokens = [(s["id"], t) for s in segs for t in s["text"].split()]
     props = [p for s in segs for p in _whisper_props(s)]
-    ctc = []
+    ctc: list[dict | None] = [None] * len(tokens)
     fallback = False
-    if tokens:
+    if tokens and mode == "testo_intero":
         try:
-            text = "".join(s["text"] for s in segs)
-            em, stride = generate_emissions(
-                _ctc_model, torch.from_numpy(audio_np).to(_ctc_model.dtype).to(_ctc_model.device), batch_size=8)
-            ts, tx = preprocess_text(text, romanize=True, language=_iso3(LANGUAGE))
-            sg, sc, blank = get_alignments(em, ts, _ctc_tok)
-            ctc = postprocess_results(tx, get_spans(ts, sg, blank), stride, sc)
+            out = _ctc_align_text(audio_np, "".join(s["text"] for s in segs))
+            if len(out) == len(tokens):
+                ctc = out
+            else:
+                fallback = True
         except Exception as exc:
             logger.warning("CTC align fallito, uso i tempi di Whisper: %s", exc)
-        if len(ctc) != len(tokens):
-            logger.warning("CTC: %d token contro %d parole — uso i tempi di Whisper", len(ctc), len(tokens))
-            fallback, ctc = True, []
+            fallback = True
+    elif tokens:
+        k = 0
+        sr = 16000
+        for s in segs:
+            n = len(s["text"].split())
+            if n == 0:
+                continue
+            a = max(0.0, s["start"] - ALIGN_PHRASE_PAD_S)
+            b = min(len(audio_np) / sr, s["end"] + ALIGN_PHRASE_PAD_S)
+            try:
+                out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)], s["text"])
+            except Exception as exc:
+                logger.warning("CTC frase %s fallita, tempi di Whisper: %s", s["id"], exc)
+                out = []
+            if len(out) == n:
+                for j, w in enumerate(out):
+                    ctc[k + j] = dict(w, start=w["start"] + a, end=w["end"] + a)
+            else:
+                fallback = True
+            k += n
     words = []
     for i, ((seg_id, tok), p) in enumerate(zip(tokens, props)):
-        if ctc:
+        if ctc[i] is not None:
             st, en = ctc[i]["start"], ctc[i]["end"]
             align = float(np.exp(ctc[i]["score"])) if ctc[i].get("score") is not None else None
         else:
@@ -1446,6 +1513,8 @@ class TranscribeRequest(BaseModel):
     compat_v1: bool = False
     # Filtro del parlato prima di Whisper (vedi _asr_nonbatched); None = V2_VAD_MODE o "silero".
     vad_mode: str | None = None
+    lang_mode: str | None = None    # "it" (forzato) | "auto_it_en"; None = V2_LANG_MODE
+    align_mode: str | None = None   # "frase" | "testo_intero"; None = V2_ALIGN_MODE
 
 
 class VoiceprintRequest(BaseModel):
@@ -1550,14 +1619,17 @@ def transcribe(req: TranscribeRequest):
             t_pre = time.perf_counter()
             pre_diar = _diarize_model(audio_np, return_embeddings=True)
             timing["diarize_pre"] = round(time.perf_counter() - t_pre, 2)
+        lang_mode = req.lang_mode or LANG_MODE_DEFAULT
+        align_mode = req.align_mode or ALIGN_MODE_DEFAULT
         nb_segs = _asr_nonbatched(audio_np, lang, vad_mode,
-                                  _speech_clips(pre_diar[0]) if pre_diar is not None else None)
+                                  _speech_clips(pre_diar[0]) if pre_diar is not None else None,
+                                  lang_mode=lang_mode)
         detected_lang = lang
         timing["asr"] = round(time.perf_counter() - t_asr, 2)
         logger.info("ASR non batched in %.1fs -- %d segmenti", timing["asr"], len(nb_segs))
 
         t_align = time.perf_counter()
-        words, align_fallback = _ctc_words(audio_np, nb_segs)
+        words, align_fallback = _ctc_words(audio_np, nb_segs, align_mode)
         _free_vram()   # le emissioni ctc su 5 min di audio occupano ~3.6 GB che la cache non restituisce
         timing["align"] = round(time.perf_counter() - t_align, 2)
         logger.info("CTC align in %.1fs -- %d parole (fallback=%s)", timing["align"], len(words), align_fallback)
@@ -1670,7 +1742,7 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode,
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode,
                 "vad": "vedi vad_mode", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
