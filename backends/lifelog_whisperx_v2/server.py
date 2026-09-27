@@ -521,9 +521,46 @@ def _frames_to_crop(waveform: torch.Tensor, frames: list[int]) -> torch.Tensor |
     return crop if crop.shape[1] >= MIN_SPEECH_MS * 16 else None
 
 
+def _word_pyannote_labels(words: list[dict], diarize_df) -> list[str | None]:
+    """Voce pyannote che copre di più ciascuna parola (None se nessuna la copre)."""
+    iv = [(r.start, r.end, r.speaker) for r in diarize_df.itertuples()] if diarize_df is not None else []
+    out = []
+    for w in words:
+        best, bo = None, 0.0
+        for a, b, l in iv:
+            o = min(b, w["end"]) - max(a, w["start"])
+            if o > bo:
+                best, bo = l, o
+        out.append(best)
+    return out
+
+
+def _phrase_pieces(words: list[dict], plabels: list[str | None]) -> list[tuple[int, list[int], str | None]]:
+    """Frasi di Whisper spezzate dove cambia la voce pyannote (2026-09-27, r4 di Lifelog2):
+    pyannote è affidabile nel sentire QUANDO cambia chi parla, non nel dire CHI è. Le parole
+    senza voce pyannote restano nel pezzo precedente. Ritorna [(seg, [indici parole], etichetta)]."""
+    pieces: list[tuple[int, list[int], str | None]] = []
+    for k, w in enumerate(words):
+        lab = plabels[k]
+        if pieces and pieces[-1][0] == w["seg"] and (lab is None or lab == pieces[-1][2] or pieces[-1][2] is None):
+            seg, ks, cur = pieces[-1]
+            ks.append(k)
+            if cur is None and lab is not None:
+                pieces[-1] = (seg, ks, lab)
+        else:
+            pieces.append((w["seg"], [k], lab))
+    return pieces
+
+
 def _v2_embeddings(waveform: torch.Tensor, words: list[dict], over: set[int],
-                   embed_words: bool) -> dict:
-    """Impronte per frase e per finestra (e per parola se richiesto, solo per misura)."""
+                   embed_words: bool, diarize_df=None) -> dict:
+    """Impronte per frase, per pezzo di frase (spezzata ai cambi di voce pyannote) e per
+    finestra (e per parola se richiesto, solo per misura).
+
+    I pezzi (2026-09-27): all'ascolto di Roberto l'impronta della FRASE separava nettamente
+    l'utente dagli altri (utente 0.39–0.75, altri ≤0.18) mentre le finestre da 1.5 s nel rumore
+    scendevano sotto 0.30 anche per l'utente; ma una frase di Whisper negli scambi veloci contiene
+    più battute di persone diverse → frase spezzata dove pyannote sente un cambio di voce."""
     pad = WORD_PAD_MS // 10
     wframes = [set(range(int(w["start"] * 100) - pad, int(w["end"] * 100) + pad)) for w in words]
     speech = set().union(*wframes) - over if wframes else set()
@@ -539,6 +576,16 @@ def _v2_embeddings(waveform: torch.Tensor, words: list[dict], over: set[int],
         items.append(("phrases", {"seg": seg_id, "speech_ms": len(fr) * 10,
                                   "overlap_removed_ms": len(allf & over) * 10}))
         crops.append(c)
+
+    plabels = _word_pyannote_labels(words, diarize_df)
+    for n_piece, (seg_id, ks, plab) in enumerate(_phrase_pieces(words, plabels)):
+        allf = set().union(*(wframes[k] for k in ks))
+        fr = sorted(allf - over)
+        items.append(("pieces", {"piece": n_piece, "seg": seg_id, "w0": words[ks[0]]["i"], "w1": words[ks[-1]]["i"],
+                                 "start_ms": int(words[ks[0]]["start"] * 1000), "end_ms": int(words[ks[-1]]["end"] * 1000),
+                                 "pyannote": plab, "speech_ms": len(fr) * 10,
+                                 "overlap_removed_ms": len(allf & over) * 10}))
+        crops.append(_frames_to_crop(waveform, fr))
 
     if words:
         a = int(words[0]["start"] * 1000) // WIN_STEP_MS * WIN_STEP_MS
@@ -562,7 +609,7 @@ def _v2_embeddings(waveform: torch.Tensor, words: list[dict], over: set[int],
     embs = _embed_batch_grouped([crops[i] for i in idx]) if idx and _voiceprint_model is not None else []
     vec = dict(zip(idx, embs))
     out = {"model": "wespeaker-voxceleb-resnet293-LM", "dim": 256, "encoding": "float16-base64",
-           "phrases": [], "windows": {"size_ms": WIN_SIZE_MS, "step_ms": WIN_STEP_MS, "items": []}}
+           "phrases": [], "pieces": [], "windows": {"size_ms": WIN_SIZE_MS, "step_ms": WIN_STEP_MS, "items": []}}
     if embed_words:
         out["words"] = []
     for i, (kind, meta) in enumerate(items):
@@ -1738,7 +1785,7 @@ def transcribe(req: TranscribeRequest):
         t_emb = time.perf_counter()
         over = _overlap_frames(diarize_segs)
         waveform = torch.from_numpy(audio_np).unsqueeze(0)
-        emb_block = _v2_embeddings(waveform, words, over, req.embed_words)
+        emb_block = _v2_embeddings(waveform, words, over, req.embed_words, diarize_segs)
         _free_vram()
         timing["embed"] = round(time.perf_counter() - t_emb, 2)
         ov_iv = []
