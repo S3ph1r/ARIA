@@ -414,6 +414,7 @@ def _whisper_props(seg: dict) -> list[dict]:
 ALIGN_MODES = ("frase", "testo_intero")
 ALIGN_MODE_DEFAULT = os.getenv("V2_ALIGN_MODE", "testo_intero")   # "frase" dopo la prova
 ALIGN_PHRASE_PAD_S = 0.5     # margine attorno alla frase di Whisper in cui ctc può collocare le parole
+ALIGN_MAX_DEV_S = 1.5        # parola che ctc sposta più di così dal tempo di Whisper → tempo di Whisper
 
 
 def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
@@ -456,8 +457,14 @@ def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> t
             n = len(s["text"].split())
             if n == 0:
                 continue
-            a = max(0.0, s["start"] - ALIGN_PHRASE_PAD_S)
-            b = min(len(audio_np) / sr, s["end"] + ALIGN_PHRASE_PAD_S)
+            # finestra = dalla prima all'ultima parola secondo Whisper, non gli estremi della frase:
+            # una «frase» di Whisper può durare 100 s con dentro musica o silenzio (e9495c56: «Ha
+            # sciolti.» da 4 a 110 s, ctc metteva «Ha» a 116 s)
+            ww = [w for w in s.get("wwords") or [] if w.get("start") is not None]
+            ws0 = ww[0]["start"] if ww else s["start"]
+            we0 = ww[-1]["end"] if ww else s["end"]
+            a = max(0.0, ws0 - ALIGN_PHRASE_PAD_S)
+            b = min(len(audio_np) / sr, we0 + ALIGN_PHRASE_PAD_S)
             try:
                 out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)], s["text"])
             except Exception as exc:
@@ -471,7 +478,9 @@ def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> t
             k += n
     words = []
     for i, ((seg_id, tok), p) in enumerate(zip(tokens, props)):
-        if ctc[i] is not None:
+        if ctc[i] is not None and not (
+                mode == "frase" and p.get("w_start") is not None
+                and abs(ctc[i]["start"] - p["w_start"]) > ALIGN_MAX_DEV_S):
             st, en = ctc[i]["start"], ctc[i]["end"]
             align = float(np.exp(ctc[i]["score"])) if ctc[i].get("score") is not None else None
         else:
