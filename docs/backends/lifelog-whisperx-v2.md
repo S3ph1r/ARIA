@@ -88,3 +88,19 @@ Decisione di Roberto dopo la prova su 22 segmenti e l'ascolto (Lifelog2 `docs/li
 - Il backend manda anche i **pezzi** (frase tagliata ai cambi di etichetta pyannote, con impronta): l'identità la
   decide Lifelog su questi (asr_rebuild r4).
 Le vecchie modalità restano disponibili per richiesta o variabile d'ambiente (`V2_LANG_MODE`, `V2_ALIGN_MODE`).
+
+## [2026-09-28] Seconda passata in italiano sui pezzi brevi; protezioni del ctc
+
+- **Lingua nella seconda passata** (3bd37f5): con `auto_it_en` i pezzi recuperati (mediana 1.1 s) venivano
+  riconosciuti come inglese e riempiti di frasi fatte («I'll tell the police» ×9): 583 su 139 segmenti. Ora i pezzi
+  recuperati <`V2_RECOVER_AUTO_MIN_S` (10 s) vanno in `V2_RECOVER_SHORT_LANG` (it); sui 22 segmenti di prova le
+  recuperate in inglese passano da 140 a 19, le parole restano (6.709 contro 6.705). Costo: l'inglese vero
+  brevissimo nei pezzi recuperati («Get on with the meeting», 0.8 s) diventa italiano inventato.
+- **Crash nativo del ctc** (9df1c13 e seguenti): ctc-forced-aligner 0.3.0 corrompe la memoria (Windows
+  0xc0000374, processo morto senza errore Python, rilevato secondi dopo in un'altra frase) su due input che non
+  controlla: una parola che dopo la romanizzazione resta vuota (cifre: «8 ore al giorno») e frasi con quasi un
+  fotogramma per token (ripetizioni di Whisper compresse: 37 token in 1.2 s, errore «r != u»). Ora queste frasi
+  usano i tempi di Whisper: parole senza lettere → errore; meno di 2 fotogrammi (40 ms) per token → errore
+  (parlato normale ≈ 3–4 per lettera). Riprodotto e verificato sul segmento 78af6078 (crash 3 volte su 3 → 0).
+- **Lanci lunghi sul PC**: da SSH il processo muore con la sessione; si lancia con un'attività pianificata
+  una tantum che esegue `pythonw.exe` (nessuna finestra da chiudere per sbaglio), log scritto dallo script.
