@@ -437,6 +437,15 @@ def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     em, stride = generate_emissions(
         _ctc_model, torch.from_numpy(audio).to(_ctc_model.dtype).to(_ctc_model.device), batch_size=8)
     ts, tx = preprocess_text(text, romanize=True, language=_iso3(LANGUAGE))
+    # 2026-09-28: la parte nativa di ctc-forced-aligner non controlla che ci siano abbastanza
+    # fotogrammi per i token (ogni token ne vuole almeno uno, due lettere uguali di fila almeno due):
+    # con audio troppo corto scrive fuori memoria e il processo muore (0xc0000374, segmento 78af6078,
+    # due volte nello stesso punto). Qui il caso diventa un errore Python → tempi di Whisper.
+    toks = [t for x in ts for t in x.split()]
+    need = len(toks) + sum(1 for i in range(1, len(toks)) if toks[i] == toks[i - 1])
+    frames = int(em.shape[-2]) if em.dim() >= 2 else 0
+    if not toks or frames < need + 1:
+        raise ValueError(f"audio troppo corto per ctc: {frames} fotogrammi, servono {need + 1}")
     sg, sc, blank = get_alignments(em, ts, _ctc_tok)
     return postprocess_results(tx, get_spans(ts, sg, blank), stride, sc)
 
@@ -479,6 +488,7 @@ def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> t
             we0 = ww[-1]["end"] if ww else s["end"]
             a = max(0.0, ws0 - ALIGN_PHRASE_PAD_S)
             b = min(len(audio_np) / sr, we0 + ALIGN_PHRASE_PAD_S)
+            logger.debug("CTC frase %s: %.2f-%.2f s, %d parole", s["id"], a, b, n)
             try:
                 out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)], s["text"])
             except Exception as exc:
