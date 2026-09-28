@@ -449,8 +449,11 @@ def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     # nativa corrompe la memoria (0xc0000374 rilevato più tardi, in un'altra frase). Frase → Whisper.
     if any(not x.strip() for x in ts):
         raise ValueError(f"parola senza lettere dopo la romanizzazione: {text!r}")
-    if not toks or frames < need + 1:
-        raise ValueError(f"audio troppo corto per ctc: {frames} fotogrammi, servono {need + 1}")
+    # Al limite teorico (fotogrammi ≈ token) il percorso non torna («r != u», frase 111 di 78af6078:
+    # 37 token in 58 fotogrammi, ripetizione di Whisper compressa in 1.2 s) e la memoria si corrompe.
+    # Parlato normale = 3–4 fotogrammi per lettera: sotto 2 per token la frase va ai tempi di Whisper.
+    if not toks or frames < 2 * need:
+        raise ValueError(f"audio troppo corto per ctc: {frames} fotogrammi per {need} token")
     sg, sc, blank = get_alignments(em, ts, _ctc_tok)
     return postprocess_results(tx, get_spans(ts, sg, blank), stride, sc)
 
