@@ -431,6 +431,43 @@ ALIGN_PHRASE_PAD_S = 0.5     # margine attorno alla frase di Whisper in cui ctc 
 ALIGN_MAX_DEV_S = 1.5        # parola che ctc sposta più di così dal tempo di Whisper → tempo di Whisper
 
 
+_IT_UNITS = ("zero uno due tre quattro cinque sei sette otto nove dieci undici dodici tredici quattordici "
+             "quindici sedici diciassette diciotto diciannove").split()
+_IT_TENS = "_ _ venti trenta quaranta cinquanta sessanta settanta ottanta novanta".split()
+
+
+def _it_number(n: int) -> str:
+    """Numero intero in lettere italiane, senza spazi (1200 → milleduecento). Serve solo al ctc."""
+    if n < 20:
+        return _IT_UNITS[n]
+    if n < 100:
+        t, u = divmod(n, 10)
+        w = _IT_TENS[t]
+        return (w[:-1] if u in (1, 8) else w) + (_IT_UNITS[u] if u else "")
+    if n < 1000:
+        h, r = divmod(n, 100)
+        return ("cento" if h == 1 else _IT_UNITS[h] + "cento") + (_it_number(r) if r else "")
+    if n < 1_000_000:
+        k, r = divmod(n, 1000)
+        return ("mille" if k == 1 else _it_number(k) + "mila") + (_it_number(r) if r else "")
+    if n < 1_000_000_000:
+        m, r = divmod(n, 1_000_000)
+        return ("unmilione" if m == 1 else _it_number(m) + "milioni") + (_it_number(r) if r else "")
+    return "".join(_IT_UNITS[int(c)] for c in str(n))
+
+
+def _ctc_spell(word: str) -> str:
+    """2026-09-28: le cifre non hanno lettere per il modello ctc («8 ore al giorno» diventava una parola
+    vuota e la parte nativa corrompeva la memoria; 346 frasi su 139 segmenti ricadevano su Whisper).
+    Ogni gruppo di cifre diventa lettere italiane attaccate alla parola (B37 → btrentasette, 2.35 →
+    duetrentacinque): una parola resta una parola, il testo trascritto non cambia."""
+    def num(m):
+        d = m.group(0)
+        return "".join(_IT_UNITS[int(c)] for c in d) if len(d) > 1 and d[0] == "0" else _it_number(int(d))
+    word = re.sub(r"\d{1,3}(?:\.\d{3})+(?!\d)", lambda m: m.group(0).replace(".", ""), word)   # 1.800 → 1800
+    return re.sub(r"\d+", num, word)
+
+
 def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     from ctc_forced_aligner import (generate_emissions, get_alignments, get_spans,
                                     postprocess_results, preprocess_text)
@@ -498,7 +535,8 @@ def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> t
             b = min(len(audio_np) / sr, we0 + ALIGN_PHRASE_PAD_S)
             logger.debug("CTC frase %s: %.2f-%.2f s, %d parole: %r", s["id"], a, b, n, s["text"])
             try:
-                out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)], s["text"])
+                out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)],
+                                      " ".join(_ctc_spell(t) for t in s["text"].split()))
             except Exception as exc:
                 logger.warning("CTC frase %s fallita, tempi di Whisper: %s", s["id"], exc)
                 out = []
