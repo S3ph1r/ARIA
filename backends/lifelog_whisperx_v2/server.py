@@ -445,6 +445,10 @@ def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     need = len(toks) + sum(1 for i in range(1, len(toks)) if toks[i] == toks[i - 1])
     frames = int(em.shape[-2]) if em.dim() >= 2 else 0
     logger.debug("CTC: emissioni %s, token %d (servono %d), romanizzato %r", tuple(em.shape), len(toks), need + 1, ts)
+    # «8 ore al giorno»: la cifra diventa una parola vuota ('') dopo la romanizzazione e la parte
+    # nativa corrompe la memoria (0xc0000374 rilevato più tardi, in un'altra frase). Frase → Whisper.
+    if any(not x.strip() for x in ts):
+        raise ValueError(f"parola senza lettere dopo la romanizzazione: {text!r}")
     if not toks or frames < need + 1:
         raise ValueError(f"audio troppo corto per ctc: {frames} fotogrammi, servono {need + 1}")
     sg, sc, blank = get_alignments(em, ts, _ctc_tok)
