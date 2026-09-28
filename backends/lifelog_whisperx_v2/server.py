@@ -444,6 +444,7 @@ def _ctc_align_text(audio: np.ndarray, text: str) -> list[dict]:
     toks = [t for x in ts for t in x.split()]
     need = len(toks) + sum(1 for i in range(1, len(toks)) if toks[i] == toks[i - 1])
     frames = int(em.shape[-2]) if em.dim() >= 2 else 0
+    logger.debug("CTC: emissioni %s, token %d (servono %d), romanizzato %r", tuple(em.shape), len(toks), need + 1, ts)
     if not toks or frames < need + 1:
         raise ValueError(f"audio troppo corto per ctc: {frames} fotogrammi, servono {need + 1}")
     sg, sc, blank = get_alignments(em, ts, _ctc_tok)
@@ -488,7 +489,7 @@ def _ctc_words(audio_np: np.ndarray, segs: list[dict], mode: str = "frase") -> t
             we0 = ww[-1]["end"] if ww else s["end"]
             a = max(0.0, ws0 - ALIGN_PHRASE_PAD_S)
             b = min(len(audio_np) / sr, we0 + ALIGN_PHRASE_PAD_S)
-            logger.debug("CTC frase %s: %.2f-%.2f s, %d parole", s["id"], a, b, n)
+            logger.debug("CTC frase %s: %.2f-%.2f s, %d parole: %r", s["id"], a, b, n, s["text"])
             try:
                 out = _ctc_align_text(audio_np[int(a * sr):int(b * sr)], s["text"])
             except Exception as exc:
