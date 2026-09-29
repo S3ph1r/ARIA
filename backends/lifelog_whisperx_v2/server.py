@@ -1868,7 +1868,7 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode, "recover_short_lang": RECOVER_SHORT_LANG, "recover_auto_min_s": RECOVER_AUTO_MIN_S,
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode, "recover_short_lang": RECOVER_SHORT_LANG, "recover_auto_min_s": RECOVER_AUTO_MIN_S, "initial_prompt": ITALIAN_CONTEXT_PROMPT if lang_mode == "auto_it_en" else None,
                 "vad": "vedi vad_mode", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
