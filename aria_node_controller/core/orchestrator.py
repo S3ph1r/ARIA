@@ -99,6 +99,16 @@ except ImportError:
         LifelogLLMBackend = None
         FluxImageGenBackend = None
 
+# Backend «voci» di Lifelog (2026-10-05): import separato, così un suo problema non spegne gli altri backend
+# (con l'import nel blocco comune un file mancante porta _BACKENDS_AVAILABLE=False per tutti).
+try:
+    from backends.lifelog_voices import LifelogVoicesBackend
+except ImportError:
+    try:
+        from ..backends.lifelog_voices import LifelogVoicesBackend
+    except ImportError:
+        LifelogVoicesBackend = None
+
 
 logger = get_logger("node.orchestrator")
 
@@ -959,6 +969,7 @@ class NodeOrchestrator:
         self._asr_backend        = LifelogASRBackend() if _BACKENDS_AVAILABLE else None
         self._whisperx_backend   = LifelogWhisperXBackend() if _BACKENDS_AVAILABLE else None
         self._flux_backend       = FluxImageGenBackend() if _BACKENDS_AVAILABLE and FluxImageGenBackend else None
+        self._voices_backend     = LifelogVoicesBackend() if LifelogVoicesBackend else None
 
         self.process_manager = ModelProcessManager(
             aria_root=ARIA_ROOT,
@@ -1108,7 +1119,7 @@ class NodeOrchestrator:
 
     def _run_loop(self):
         # Base models known by the node
-        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b", "whisperx-large-v3", "flux2-klein-4b"]
+        model_logic_ids = ["fish-s1-mini", "qwen3-tts-1.7b", "qwen3-tts-custom", "qwen3.5-35b-moe-q3ks", "qwen3-14b-q4km", "acestep-1.5-xl-sft", "qwen3-asr-1.7b", "whisperx-large-v3", "flux2-klein-4b", "lifelog-voices"]
         current_model = None
 
         last_heartbeat = 0
@@ -1270,6 +1281,8 @@ class NodeOrchestrator:
             self._process_flux_task(task, start_t)
         elif task.model_id in ("qwen3-asr-1.7b", "whisperx-large-v3") or task.model_type == "stt":
             self._process_asr_task(task, start_t)
+        elif task.model_id == "lifelog-voices" or task.model_type == "voices":
+            self._process_voices_task(task, start_t)
         elif task.model_id == "fish-s1-mini":
             try:
                 # --- Intent-based Resolution (SOA v2.0) ---
@@ -1782,6 +1795,27 @@ class NodeOrchestrator:
                 processing_time_seconds=time.time() - start_t,
                 error=str(e),
             )
+            self.qm.post_result(task, result)
+
+    def _process_voices_task(self, task, start_t: float):
+        """Backend «voci» di Lifelog: DiariZen + WavLM anti-replay (2026-10-05). Stesso schema del task STT."""
+        backend = self._voices_backend
+        try:
+            if not backend:
+                raise RuntimeError("Backend lifelog-voices non disponibile (handler non importato).")
+            if not self.process_manager.ensure_running(task.model_id):
+                raise RuntimeError(f"Impossibile avviare il backend {task.model_id}")
+            result_data = backend.run(payload=task.payload, aria_root=ARIA_ROOT, local_ip=self.local_ip)
+            result = AriaTaskResult(
+                job_id=task.job_id, client_id=task.client_id, model_type=task.model_type, model_id=task.model_id,
+                status="done", processing_time_seconds=time.time() - start_t, output=result_data.get("output", {}))
+            self.qm.post_result(task, result)
+            logger.info(f"Voices Task Completed: {task.job_id}")
+        except Exception as e:
+            logger.error(f"Voices Task Failed: {e}", exc_info=True)
+            result = AriaTaskResult(
+                job_id=task.job_id, client_id=task.client_id, model_type=task.model_type, model_id=task.model_id,
+                status="error", processing_time_seconds=time.time() - start_t, error=str(e))
             self.qm.post_result(task, result)
 
     def _process_asr_task(self, task, start_t: float):

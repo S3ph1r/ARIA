@@ -302,6 +302,22 @@
       "startup_wait": 240,
       "env_prefix": "envs/flux-aria",
       "script": "backends/flux_imagegen/server.py"
+    },
+    "lifelog-voices": {
+      "metadata": {
+        "display_name": "Lifelog Voices (DiariZen + WavLM anti-replay)",
+        "description": "Backend voci di Lifelog dal 2026-10-05: DiariZen wavlm-large-s80-md-v2 (voci e sovrapposizioni; pesi CC BY-NC, uso personale) + WavLM base-plus strato 3 con classificatore lineare (probabilita' 'riprodotto' per turno). Nessuna identita'. Doc: docs/backends/lifelog-voices.md.",
+        "capabilities": [
+          "diarization",
+          "overlap-detection",
+          "replay-detection"
+        ]
+      },
+      "port": 8094,
+      "health_url": "http://localhost:8094/health",
+      "startup_wait": 180,
+      "env_prefix": "envs/lifelog-voices",
+      "script": "backends/lifelog_voices/server.py"
     }
   }
 }

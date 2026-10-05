@@ -32,6 +32,7 @@ Aggiornato ad ogni modifica architetturale significativa.
 | Lifelog LLM (qwen3-14b-q4km) | 8090 | `envs/lifelog-llm` | `llama-server.exe` b9119 (CUDA 13.1 sm_120) | ✅ Operativo (`startup_wait: 600s` — caricamento ~10 min) | ~9 GB |
 | Lifelog WhisperX large-v3 | 8091 | `envs/lifelog-whisperx` | `backends/lifelog_whisperx/server.py` | ✅ Operativo (2026-05-14) | ~10 GB |
 | FLUX.2-klein-4B | 8092 | `envs/flux-aria` | `backends/flux_imagegen/server.py` | ✅ Operativo (2026-05-16) | ~12.8 GB |
+| Lifelog Voices (DiariZen + WavLM anti-replay) | 8094 | `envs/lifelog-voices` | `backends/lifelog_voices/server.py` | 🧪 In prova, ombra (2026-10-05) — `docs/backends/lifelog-voices.md` | ~11 GB |
 
 > I backend su porta 8084 e 8086 condividono lo stesso ambiente `dias-sound-engine` ma sono processi distinti avviati in momenti diversi — mai in contemporanea per gestione VRAM.
 
