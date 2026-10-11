@@ -73,7 +73,11 @@ class LifelogWhisperXBackend:
             # (scoperto il 2026-07-28: min_speakers non arrivava mai al backend).
             # compat_v1 / embed_words: opzioni del backend lifelog_whisperx_v2 (2026-09-26),
             # solo per confronti; il v1 le ignora.
-            for opt in ("min_speakers", "max_speakers", "exclusive_diarization", "compat_v1", "embed_words"):
+            # 2026-10-11: anche le modalità del v2 e le opzioni di prova sulle allucinazioni (asr_opts), che
+            # finora cadevano qui senza avviso. Effetto solo dal prossimo riavvio dell'orchestratore (il modulo non
+            # viene ricaricato per i task STT).
+            for opt in ("min_speakers", "max_speakers", "exclusive_diarization", "compat_v1", "embed_words",
+                        "vad_mode", "lang_mode", "align_mode", "asr_opts"):
                 if payload.get(opt) is not None:
                     body[opt] = payload[opt]
             r = requests.post(f"{server_url}/transcribe", json=body, timeout=600)

@@ -334,14 +334,22 @@ class _ItEnOnly:
 
 
 def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero",
-                    clips: list[float] | None = None, lang_mode: str = "it") -> list[dict]:
+                    clips: list[float] | None = None, lang_mode: str = "it",
+                    opts: dict | None = None, passata: int = 1) -> list[dict]:
     """Whisper large-v3 non batched: segmenti con logprob/no_speech reali e parole con probabilità.
 
     vad_mode (2026-09-27): "silero" = filtro VAD di faster-whisper ai valori di default (scarta
     TV/radio in sottofondo: Dark Matter 215 → 4 parole); "silero_basso" = soglia 0.25;
     "nessuno" = Whisper su tutto l'audio; "pyannote" = Whisper solo nelle zone di parlato di
-    pyannote (clip_timestamps), come faceva di fatto il v1."""
+    pyannote (clip_timestamps), come faceva di fatto il v1.
+
+    opts (2026-10-11, prove sulle allucinazioni, Lifelog2 docs/lifelog2-audit-tratti-2026-10.md): solo se la richiesta
+    porta `asr_opts`; senza, il comportamento è quello di prima. Chiavi:
+      hst / hst1 / hst2 — hallucination_silence_threshold di faster-whisper (s), per tutte e due le passate o per una;
+      prompt — frase di contesto al posto di ITALIAN_CONTEXT_PROMPT ("" = nessuna);
+      temp2 — temperatura (numero o lista) della seconda passata (0.0 = niente fallback «creativo» sul rumore)."""
     kw: dict = {}
+    o = opts or {}
     if vad_mode == "silero":
         kw["vad_filter"] = True
     elif vad_mode == "silero_basso":
@@ -358,7 +366,7 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
         # 2026-09-27: prima passata come "silero" (conversazioni identiche a quelle verificate a
         # orecchio), seconda passata SOLO sui pezzi dove pyannote sente voce ma la prima non ha
         # trascritto nulla — TV e radio in sottofondo che il VAD Silero scarta.
-        first = _asr_nonbatched(audio_np, language, "silero", lang_mode=lang_mode)
+        first = _asr_nonbatched(audio_np, language, "silero", lang_mode=lang_mode, opts=opts, passata=1)
         covered = sorted((w["start"] - RECOVER_COVER_PAD_S, w["end"] + RECOVER_COVER_PAD_S)
                          for s in first for w in s["wwords"])
         todo = []
@@ -376,11 +384,14 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
         if RECOVER_SHORT_LANG and lang_mode != "it":
             short = [x for ab in todo if ab[1] - ab[0] < RECOVER_AUTO_MIN_S for x in ab]
             long_ = [x for ab in todo if ab[1] - ab[0] >= RECOVER_AUTO_MIN_S for x in ab]
-            second = ((_asr_nonbatched(audio_np, RECOVER_SHORT_LANG, "pyannote", short, lang_mode="it") if short else [])
-                      + (_asr_nonbatched(audio_np, language, "pyannote", long_, lang_mode=lang_mode) if long_ else []))
+            second = ((_asr_nonbatched(audio_np, RECOVER_SHORT_LANG, "pyannote", short, lang_mode="it",
+                                       opts=opts, passata=2) if short else [])
+                      + (_asr_nonbatched(audio_np, language, "pyannote", long_, lang_mode=lang_mode,
+                                         opts=opts, passata=2) if long_ else []))
         else:
             flat = [x for ab in todo for x in ab]
-            second = _asr_nonbatched(audio_np, language, "pyannote", flat, lang_mode=lang_mode) if flat else []
+            second = (_asr_nonbatched(audio_np, language, "pyannote", flat, lang_mode=lang_mode, opts=opts, passata=2)
+                      if flat else [])
         for s in second:
             s["recovered"] = True
         merged = sorted(first + second, key=lambda s: s["start"])
@@ -392,8 +403,14 @@ def _asr_nonbatched(audio_np: np.ndarray, language: str, vad_mode: str = "silero
     if lang_mode == "auto_it_en":
         if not isinstance(_model.model, _ItEnOnly):
             _model.model = _ItEnOnly(_model.model)
-        kw.update(multilingual=True, initial_prompt=ITALIAN_CONTEXT_PROMPT)
+        prompt = o.get("prompt", ITALIAN_CONTEXT_PROMPT)
+        kw.update(multilingual=True, initial_prompt=prompt or None)
         language = language or "it"    # lingua iniziale; poi decide la finestra (it/en)
+    hst = o.get(f"hst{passata}", o.get("hst"))
+    if hst:
+        kw["hallucination_silence_threshold"] = float(hst)
+    if passata == 2 and o.get("temp2") is not None:
+        kw["temperature"] = o["temp2"]
     segs, _info = _model.transcribe(audio_np, language=language, word_timestamps=True, **kw)
     out = []
     for k, s in enumerate(segs):
@@ -1641,6 +1658,8 @@ class TranscribeRequest(BaseModel):
     vad_mode: str | None = None
     lang_mode: str | None = None    # "it" (forzato) | "auto_it_en"; None = V2_LANG_MODE
     align_mode: str | None = None   # "frase" | "testo_intero"; None = V2_ALIGN_MODE
+    # Opzioni di prova sulle allucinazioni (2026-10-11), vedi _asr_nonbatched; None = comportamento di produzione.
+    asr_opts: dict | None = None
 
 
 class VoiceprintRequest(BaseModel):
@@ -1749,7 +1768,7 @@ def transcribe(req: TranscribeRequest):
         align_mode = req.align_mode or ALIGN_MODE_DEFAULT
         nb_segs = _asr_nonbatched(audio_np, lang, vad_mode,
                                   _speech_clips(pre_diar[0]) if pre_diar is not None else None,
-                                  lang_mode=lang_mode)
+                                  lang_mode=lang_mode, opts=req.asr_opts)
         detected_lang = lang
         timing["asr"] = round(time.perf_counter() - t_asr, 2)
         logger.info("ASR non batched in %.1fs -- %d segmenti", timing["asr"], len(nb_segs))
@@ -1868,7 +1887,7 @@ def transcribe(req: TranscribeRequest):
             "version": V2_VERSION,
             "timing_s": timing,
             "asr": {
-                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode, "recover_short_lang": RECOVER_SHORT_LANG, "recover_auto_min_s": RECOVER_AUTO_MIN_S, "initial_prompt": ITALIAN_CONTEXT_PROMPT if lang_mode == "auto_it_en" else None,
+                "model": "faster-whisper-large-v3", "batched": False, "language": lang, "vad_mode": vad_mode, "lang_mode": lang_mode, "align_mode": align_mode, "recover_short_lang": RECOVER_SHORT_LANG, "recover_auto_min_s": RECOVER_AUTO_MIN_S, "initial_prompt": ((req.asr_opts or {}).get("prompt", ITALIAN_CONTEXT_PROMPT) or None) if lang_mode == "auto_it_en" else None, "asr_opts": req.asr_opts,
                 "vad": "vedi vad_mode", "decode": "faster-whisper default (beam 5, fallback di temperatura)",
                 "segments": [{"id": s["id"], "start_ms": int(s["start"] * 1000), "end_ms": int(s["end"] * 1000),
                               "text": s["text"].strip(), "avg_logprob": round(s["avg_logprob"], 4),
