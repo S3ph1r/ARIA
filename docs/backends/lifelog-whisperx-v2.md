@@ -144,3 +144,36 @@ Le opzioni usate finiscono nell'uscita (`v2.asr.asr_opts`, `v2.asr.initial_promp
   è partito e il ticket è chiuso.»), V3 (V1 + V2 + `temp2` 0), più ripetizioni dalla coda con la richiesta di
   produzione (`V0rep`) per misurare la variabilità.
 - Risultati sotto, appena finita.
+
+**Risultati (2026-10-11 mattina).**
+- Turno di notte 08/10, 22 segmenti comuni a tutte le varianti; parole tenute = non tolte dai filtri di Lifelog;
+  «ritrovate» = stessa parola entro ±1 s.
+- Frasi di controllo: 13 frasi vere e 4 invenzioni note, dalla lettura integrale.
+
+| variante | parole della produzione ritrovate | parole tenute | frasi vere | chiusure video / eco della frase di contesto prodotte |
+|---|---|---|---|---|
+| produzione | — | 3145 | 13/13 | 6 / 3 |
+| V0rep (produzione ripetuta dalla coda) | 96,7% | 3133 | 13/13 | 5 / 3 |
+| V1 `hst` 2 s | 89,3% | 3599 | 12/13 | 1 / 0 |
+| V2 frase di contesto neutra | 69,5% | 3331 | 8/13 | 4 / 3 (copia anche la frase nuova) |
+| V3 `hst` + frase neutra + `temp2` 0 | 69,4% | 3573 | 8/13 | 2 / 0 |
+
+- **Variabilità**: la stessa richiesta sullo stesso WAV cambia ~3% delle parole (fallback di temperatura).
+- **La frase di contesto guida tutta la decodifica.** Cambiarla rimescola il 30% del testo e perde frasi vere
+  («Ok, il collega ti ha mandato l'IP, no?» → «Ok, collegati alla IP, no?»; «Dimmi, dimmi.» sparisce).
+- Con la frase neutra il segmento `ee6ea9f3` fa **morire il backend nella prima passata**, due volte su due: crash
+  nativo di ctranslate2, senza errore Python. Lo stesso segmento passa con la frase attuale e in V3.
+- **`temp2` 0 è dannoso.** Sul parlato debole Whisper ripiega su «Grazie.» (17 volte dove la produzione aveva «Ha
+  mandato la mail perché comunque in realtà doveva dire il centro.»): il fallback di temperatura recupera parlato
+  vero.
+- **`hst` (V1)** riduce le chiusure dei video inventate (6 → 1). Cambia però il percorso di decodifica della prima
+  passata: 7 punti di testo diverso oltre la variabilità, +14% di parole tenute (miste: «Senti, c'è la telefonata.»
+  ma anche cicli come «la schedulazione, la schedulazione.»), e perde frasi vere («Non ci capisco, non riusciamo a
+  lavorare…», «Soletto non ti ha detto niente»). Le invenzioni della 2ª passata restano le stesse.
+
+**Decisione proposta:** produzione invariata.
+- Le invenzioni nascono soprattutto nella 2ª passata come formule fisse e Lifelog le toglie già.
+- Il residuo che conta (formule brevi, chiusure) si gestisce meglio a valle:
+  - Lifelog C1 #20;
+  - il testo JUNK non mostrato a Stage D, in prova.
+- `hst` va rivalutato solo con un ascolto delle frasi che cambia. Le opzioni restano disponibili per prove future.
