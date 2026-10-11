@@ -104,3 +104,43 @@ Le vecchie modalità restano disponibili per richiesta o variabile d'ambiente (`
   (parlato normale ≈ 3–4 per lettera). Riprodotto e verificato sul segmento 78af6078 (crash 3 volte su 3 → 0).
 - **Lanci lunghi sul PC**: da SSH il processo muore con la sessione; si lancia con un'attività pianificata
   una tantum che esegue `pythonw.exe` (nessuna finestra da chiudere per sbaglio), log scritto dallo script.
+
+## [2026-10-11] Allucinazioni: opzioni di prova `asr_opts` (default invariato)
+
+Contesto: Lifelog2 `docs/lifelog2-audit-tratti-2026-10.md`, blocchi dell'11/10.
+- Sul turno di notte 08/10 (26 segmenti, 02:36-04:41) la 2ª passata scrive 396 frasi: Lifelog ne butta 300 come
+  inventate e ne tiene 96 (577 parole, il 14% del testo tenuto, in buona parte vere: voci deboli nel rumore).
+- Le invenzioni sono soprattutto formule brevi: «Grazie.», «Grazie a tutti.», chiusure dei video.
+- **La frase di contesto di `auto_it_en` viene ricopiata alla lettera** nei silenzi («Ho visto il meeting su YouTube,
+  l'app funziona e il feedback del team è ok.», 33 frasi in 123 segmenti, tolte da Lifelog) e ne escono pezzi nei
+  turni («Come was the meeting? It was good.», «la vostra team è ok»).
+
+**Controlli fatti prima di cambiare.**
+- Un controllo sul livello prima della 2ª passata non serve: le frasi tenute e quelle inventate stanno allo stesso
+  livello sopra il fondo (mediana 2,3 e 2,6 dB). Qualunque soglia toglie le une e le altre in proporzione (a 8 dB:
+  231/300 inventate e 71/96 tenute); Silero fa lo stesso.
+- Le inventate hanno `avg_logprob` più alto (−0,23 contro −0,53) e `no_speech_prob` più alto (0,16 contro 0,05).
+- `condition_on_previous_text=False` resta escluso: senza condizionamento il testo peggiorava (prova di settembre,
+  sopra).
+- faster-whisper sul PC 139: 1.2.1, ha `hallucination_silence_threshold` (non usato finora).
+
+**Opzioni** (`TranscribeRequest.asr_opts`, ARIA `86489b6`): senza il campo il comportamento è quello di prima.
+- `hst` / `hst1` / `hst2`: `hallucination_silence_threshold` in secondi, per tutte e due le passate o per una.
+- `prompt`: frase di contesto al posto di `ITALIAN_CONTEXT_PROMPT` (`""` = nessuna).
+- `temp2`: temperatura della 2ª passata (`0.0` = niente fallback a temperature alte sul rumore).
+
+Le opzioni usate finiscono nell'uscita (`v2.asr.asr_opts`, `v2.asr.initial_prompt`).
+
+**Client dell'orchestratore** (`aria_node_controller/backends/lifelog_whisperx.py`).
+- Ricostruiva la richiesta con pochi campi e lasciava cadere in silenzio `vad_mode`, `lang_mode`, `align_mode` (e
+  ora `asr_opts`).
+- Aggiunti alla lista: hanno effetto **solo dal prossimo riavvio dell'orchestratore** (il modulo STT non viene
+  ricaricato per task).
+- Fino ad allora le prove chiamano il backend direttamente su :8091 mentre è acceso.
+
+**Prova** (Lifelog2 `scripts/exp/aria_allucinazioni.py`, confronto `scripts/exp/allucinazioni_confronto.py`).
+- WAV rifatti come Stage B.
+- Varianti V1 (`hst` 2 s), V2 (frase di contesto neutra: «Allora, ci sentiamo dopo. Ho controllato il server, il backup
+  è partito e il ticket è chiuso.»), V3 (V1 + V2 + `temp2` 0), più ripetizioni dalla coda con la richiesta di
+  produzione (`V0rep`) per misurare la variabilità.
+- Risultati sotto, appena finita.
